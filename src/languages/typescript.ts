@@ -3,6 +3,7 @@ import ts from "typescript";
 import { hashContent, normalizePath } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
+import { prepareVue, vueTemplateEdges } from "./vue.js";
 
 interface Declaration {
   node: ts.Node;
@@ -11,6 +12,19 @@ interface Declaration {
   nameNode?: ts.Node;
 }
 function declaration(node: ts.Node): Declaration | undefined {
+  if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
+    let parent: ts.Node = node.parent;
+    while (
+      ts.isBindingElement(parent) ||
+      ts.isObjectBindingPattern(parent) ||
+      ts.isArrayBindingPattern(parent)
+    )
+      parent = parent.parent;
+    if (ts.isVariableDeclaration(parent))
+      return { node, name: node.name.text, kind: "variable", nameNode: node.name };
+  }
+  if (ts.isExportAssignment(node) && !node.isExportEquals && callable(node.expression))
+    return { node, name: "default", kind: "function", nameNode: node.expression };
   if (ts.isFunctionDeclaration(node))
     return { node, name: node.name?.text ?? "default", kind: "function", nameNode: node.name };
   if (ts.isClassDeclaration(node))
@@ -28,18 +42,16 @@ function declaration(node: ts.Node): Declaration | undefined {
   if (ts.isPropertyDeclaration(node) || ts.isPropertySignature(node))
     return { node, name: node.name.getText(), kind: "property", nameNode: node.name };
   if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-    const callable =
-      node.initializer &&
-      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer));
+    const isCallable = callable(node.initializer);
     const topLevel =
       ts.isVariableDeclarationList(node.parent) &&
       ts.isVariableStatement(node.parent.parent) &&
       ts.isSourceFile(node.parent.parent.parent);
-    if (callable || topLevel)
+    if (isCallable || topLevel)
       return {
         node,
         name: node.name.text,
-        kind: callable ? "function" : "variable",
+        kind: isCallable ? "function" : "variable",
         nameNode: node.name,
       };
   }
@@ -56,6 +68,7 @@ function ownText(node: ts.Node): string {
   return parts.join(" ").slice(0, 8000);
 }
 function isExported(node: ts.Node): boolean {
+  if (ts.isExportAssignment(node)) return !node.isExportEquals;
   const target = ts.isVariableDeclaration(node) ? node.parent.parent : node;
   return (
     ts.canHaveModifiers(target) &&
@@ -126,9 +139,18 @@ export class TypeScriptGraph {
     files: SourceFile[],
   ): { symbols: GraphSymbol[]; edges: GraphEdge[]; warnings: string[] } {
     const { options, warnings } = languageConfiguration(root);
-    const inputs = new Map(files.map((f) => [resolve(f.absolutePath), f]));
+    const vueSources = files.filter((file) => /\.vue$/i.test(file.path)).map(prepareVue);
+    warnings.push(...vueSources.flatMap((vue) => vue.warnings));
+    const prepared = [
+      ...files.filter((file) => !/\.vue$/i.test(file.path)),
+      ...vueSources.map((vue) => vue.input),
+    ];
+    const inputs = new Map(prepared.map((file) => [resolve(file.absolutePath), file]));
+    const vueByPath = new Map(vueSources.map((vue) => [resolve(vue.input.absolutePath), vue]));
     const host = ts.createCompilerHost(options, true);
     const original = host.getSourceFile.bind(host);
+    const fileExists = host.fileExists.bind(host);
+    host.fileExists = (path) => inputs.has(resolve(path)) || fileExists(path);
     host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
       const absolute = resolve(fileName);
       const input = inputs.get(absolute);
@@ -145,13 +167,15 @@ export class TypeScriptGraph {
     host.readFile = (fileName) =>
       inputs.get(resolve(fileName))?.content ?? ts.sys.readFile(fileName);
     this.program = ts.createProgram({
-      rootNames: files.map((f) => f.absolutePath),
+      rootNames: prepared.map((file) => file.absolutePath),
       options,
       host,
       oldProgram: this.program,
     });
     const checker = this.program.getTypeChecker();
-    const symbols: GraphSymbol[] = [];
+    const symbols: GraphSymbol[] = vueSources.flatMap((vue) =>
+      vue.template ? [vue.component, vue.template] : [vue.component],
+    );
     const edges: GraphEdge[] = [];
     const byNode = new Map<ts.Node, GraphSymbol>();
     const roots = this.program
@@ -160,12 +184,28 @@ export class TypeScriptGraph {
     for (const source of roots) {
       for (const error of this.program.getSyntacticDiagnostics(source))
         warnings.push(
-          normalizePath(relative(root, source.fileName)) +
+          (inputs.get(resolve(source.fileName))?.path ??
+            normalizePath(relative(root, source.fileName))) +
             ": " +
             ts.flattenDiagnosticMessageText(error.messageText, " "),
         );
       const counters = new Map<string, number>();
-      const path = normalizePath(relative(root, source.fileName));
+      const path =
+        inputs.get(resolve(source.fileName))?.path ??
+        normalizePath(relative(root, source.fileName));
+      const vue = vueByPath.get(resolve(source.fileName));
+      if (vue) {
+        for (const statement of source.statements)
+          if (ts.isExportAssignment(statement)) byNode.set(statement, vue.component);
+        if (vue.template)
+          edges.push({
+            source: vue.component.id,
+            target: vue.template.id,
+            kind: "contains",
+            evidence: "syntax",
+            line: vue.template.startLine,
+          });
+      }
       function visit(node: ts.Node, parent?: GraphSymbol): void {
         const info = declaration(node);
         let owner = parent;
@@ -212,15 +252,15 @@ export class TypeScriptGraph {
               [info.name, qualifiedName, signature, comment, path, ownText(node)].join(" "),
             ),
             hash: hashContent(text),
-            parentId: parent?.id,
+            parentId: parent?.id ?? vue?.component.id,
             exported: isExported(node),
           };
           symbols.push(owner);
           byNode.set(node, owner);
           if (info.nameNode) byNode.set(info.nameNode, owner);
-          if (parent)
+          if (owner.parentId)
             edges.push({
-              source: parent.id,
+              source: owner.parentId,
               target: owner.id,
               kind: "contains",
               evidence: "syntax",
@@ -231,8 +271,8 @@ export class TypeScriptGraph {
       }
       visit(source);
     }
-    const resolveTarget = (node: ts.Node): GraphSymbol | undefined => {
-      let symbol = checker.getSymbolAtLocation(node);
+    const resolveSymbol = (input: ts.Symbol | undefined): GraphSymbol | undefined => {
+      let symbol = input;
       if (!symbol) return undefined;
       if (symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
       for (const definition of [symbol.valueDeclaration, ...(symbol.declarations ?? [])]) {
@@ -242,7 +282,59 @@ export class TypeScriptGraph {
       }
       return undefined;
     };
+    const resolveTarget = (node: ts.Node): GraphSymbol | undefined =>
+      resolveSymbol(checker.getSymbolAtLocation(node));
     for (const source of roots) {
+      const vue = vueByPath.get(resolve(source.fileName));
+      if (vue) {
+        const bindings = new Map<string, GraphSymbol>();
+        if (vue.descriptor.scriptSetup) {
+          for (const symbol of checker.getSymbolsInScope(
+            source,
+            ts.SymbolFlags.Value | ts.SymbolFlags.Alias,
+          )) {
+            const target = resolveSymbol(symbol);
+            if (target) bindings.set(symbol.name, target);
+          }
+        }
+        for (const statement of source.statements) {
+          if (!ts.isExportAssignment(statement)) continue;
+          let expression = statement.expression;
+          if (ts.isCallExpression(expression) && expression.arguments[0])
+            expression = expression.arguments[0];
+          if (!ts.isObjectLiteralExpression(expression)) continue;
+          for (const property of expression.properties) {
+            if (
+              !ts.isPropertyAssignment(property) ||
+              !["methods", "computed", "components"].includes(
+                property.name.getText(source).replace(/['"]/g, ""),
+              ) ||
+              !ts.isObjectLiteralExpression(property.initializer)
+            )
+              continue;
+            for (const member of property.initializer.properties) {
+              if (!member.name) continue;
+              const target = ts.isShorthandPropertyAssignment(member)
+                ? resolveSymbol(checker.getShorthandAssignmentValueSymbol(member))
+                : ts.isPropertyAssignment(member) && ts.isIdentifier(member.initializer)
+                  ? resolveTarget(member.initializer)
+                  : byNode.get(member);
+              if (target) bindings.set(member.name.getText(source).replace(/['"]/g, ""), target);
+            }
+          }
+        }
+        const canonical = (name: string) => name.replaceAll("-", "").toLowerCase();
+        edges.push(
+          ...vueTemplateEdges(vue, (name, component) => {
+            const exact = bindings.get(name);
+            if (exact || !component) return exact;
+            const matches = [...bindings].filter(
+              ([binding]) => canonical(binding) === canonical(name),
+            );
+            return matches.length === 1 ? matches[0]?.[1] : undefined;
+          }),
+        );
+      }
       function visit(node: ts.Node, parent?: GraphSymbol): void {
         const owner = byNode.get(node) ?? parent;
         if (owner) {
@@ -282,4 +374,21 @@ export class TypeScriptGraph {
     for (const path of this.cache.keys()) if (!active.has(path)) this.cache.delete(path);
     return { symbols, edges: [...unique.values()], warnings };
   }
+}
+function callable(node: ts.Expression | undefined): boolean {
+  if (!node) return false;
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return true;
+  if (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isSatisfiesExpression(node)
+  )
+    return callable(node.expression);
+  return (
+    ts.isCallExpression(node) &&
+    ((ts.isIdentifier(node.expression) && ["memo", "forwardRef"].includes(node.expression.text)) ||
+      (ts.isPropertyAccessExpression(node.expression) &&
+        ["memo", "forwardRef"].includes(node.expression.name.text))) &&
+    node.arguments.some((argument) => callable(argument))
+  );
 }

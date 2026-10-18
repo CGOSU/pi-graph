@@ -35,6 +35,8 @@
     "benchmark": "npm run build && node dist/scripts/benchmark.js"
   },
   "dependencies": {
+    "@vue/compiler-dom": "^3.5.44",
+    "@vue/compiler-sfc": "^3.5.44",
     "ignore": "^7.0.5",
     "tree-sitter": "^0.22.4",
     "tree-sitter-rust": "^0.24.0",

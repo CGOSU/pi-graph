@@ -8,6 +8,14 @@
 
 ## 会话
 
+### 2026-10-18 — Vue 与 React 支持
+
+- 新增 Vue SFC 虚拟脚本、组件/模板符号、模板绑定与组件导入关系；保留原始路径、Unicode/CRLF 范围，报告不支持的外置和预处理块。
+- React 补足内联 memo/forwardRef、匿名默认导出与 Hook 解构绑定；已有 JSX/TSX 关系继续使用 TypeScript 类型解析。
+- 6 项框架回归通过，覆盖源码范围、模板/事件引用、跨文件与路径别名、忽略/修改/删除、Options API、TSX、作用域遮蔽、大小写、解构 props/state 和 worker。原始前 3 项用例实现前均失败。
+- 验证：`npm run build && node --test dist/tests/frameworks.test.js`、`project(action: "check")` 的类型检查/lint/全量测试均通过；`npm pack --dry-run --json` 成功且包含 Vue 和 Rust 运行时适配器。
+- 遗留范围见 [README](../README.md#实现边界)。
+
 ### 2026-10-18 — Rust 语言适配
 
 - 完成 Rust Tree-sitter 适配、独立 symbol kind、扫描分流、局部调用与包含关系、哈希复用、`target/` 忽略、工具描述和边界文档。

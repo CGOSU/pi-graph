@@ -17,7 +17,7 @@ const excluded = new Set([
   ".cache",
   "target",
 ]);
-const sourcePattern = /\.(?:[cm]?[jt]sx?|rs)$/i;
+const sourcePattern = /\.(?:[cm]?[jt]sx?|rs|vue)$/i;
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }

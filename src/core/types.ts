@@ -11,7 +11,9 @@ export type SymbolKind =
   | "trait"
   | "module"
   | "variant"
-  | "macro";
+  | "macro"
+  | "component"
+  | "template";
 export interface GraphSymbol {
   id: string;
   path: string;

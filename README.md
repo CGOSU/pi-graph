@@ -37,7 +37,7 @@ Agent 工具：
 { "query": "取消生成后按钮一直转圈", "scope": "src", "limit": 6 }
 ```
 
-每个定位结果包含 symbol ID、路径、当前行号、签名、职责角色、命中原因和代码证据。关系区分 JS/TS 类型解析确认的调用/引用，以及 Rust 语法层调用和包含关系。重命名或删除后旧 ID 可能失效，应重新定位。
+每个定位结果包含 symbol ID、路径、当前行号、签名、职责角色、命中原因和代码证据。关系区分 JS/TS 类型解析确认的调用/引用，以及 Vue 模板引用、Rust 调用和包含关系等语法证据。重命名或删除后旧 ID 可能失效，应重新定位。
 
 维护命令：
 
@@ -48,8 +48,11 @@ Agent 工具：
 
 ## 实现边界
 
-- JS、TS、JSX、TSX、MJS、CJS、MTS、CTS，以及 Rust（`.rs`）；不索引 `.d.ts`。
+- JS、TS、JSX、TSX、MJS、CJS、MTS、CTS，以及 Rust（`.rs`）、Vue SFC（`.vue`）；不索引 `.d.ts`。
 - TypeScript Compiler API 提取函数、方法、类、类型、顶层变量、属性及可解析调用/引用；支持导入别名、重导出和根配置的路径别名。
+- React：支持 JSX/TSX 函数/类组件、匿名默认导出、内联 `memo`/`forwardRef` 包装、Hook 解构状态；复用 TypeScript 的 JSX 组件引用、Hook/函数调用解析。不执行组件，也不推断自定义 HOC 的运行时语义。
+- Vue：通过官方 SFC 解析器提取普通 `<script>` 和 `<script setup>`（JS/TS/JSX/TSX），保留原 `.vue` 文件的行号和 UTF-16 源码范围；跨 JS/TS/Vue 的 `.vue` 导入和根配置路径别名可解析。组件和模板分别建 symbol，模板中的可辨识绑定、事件和组件标签引用标注为 `syntax`；支持 setup 绑定及 Options API 的 methods/computed/components。
+- Vue 不编译样式、不执行宏，不完整模拟 Options API 实例类型；外置 `src`、预处理模板、非 JS/TS 脚本报告诊断，`v-for`/`v-slot` 子树暂不推断绑定关系。模板表达式区分大小写；仅组件标签支持 kebab-case 名称映射。
 - Rust 使用 Tree-sitter 提取函数、方法、struct、enum/variant、trait、模块、类型别名、字段、常量、静态变量和宏定义；包含关系与同文件可辨识调用标注为 `syntax`，不冒充类型解析结果。支持局部模块路径、`self`/`super`/`crate`、`Self` 和当前 impl 的 `self.method()`；不解析跨文件导入、任意接收者类型、宏展开或 Cargo/`cfg` 条件，不需要安装 Rust 工具链。
 - Tree-sitter 为原生依赖，支持的平台优先使用预编译包；无预编译包时安装需要 node-gyp 对应的 Python/C++ 构建环境。默认忽略 Rust 的 `target/` 构建目录。
 - SQLite + FTS5 持久化；默认缓存目录为项目下 `.pi-graph/`，建议加入目标项目的 `.gitignore`。

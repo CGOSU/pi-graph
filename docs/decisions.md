@@ -8,6 +8,13 @@
 
 ## 已确认决策
 
+### 2026-10-18 — Vue 与 React 复用 TypeScript 图谱
+
+- Vue 使用官方 `@vue/compiler-sfc` 与 `@vue/compiler-dom` 解析，不引入运行时 Vue/React，也不执行目标项目代码。
+- 脚本外内容按 UTF-16 长度替换为空白，虚拟 JS/TS 文件只存在于内存；所有公开符号和诊断保留 `.vue` 路径与原始范围，组件默认导出映射到原文件 symbol。
+- 模板绑定证据为 `syntax`；带局部作用域的 `v-for`/`v-slot` 子树暂不猜测关系，避免把局部变量连到脚本同名变量。
+- React 复用 JSX/TSX 的类型解析关系，补足匿名默认导出、内联 `memo`/`forwardRef` 和解构绑定。
+
 ### 2026-10-18 — Rust 语法层索引
 
 - 扩展现有扫描、存储和检索链路，使用 `tree-sitter` + `tree-sitter-rust`，无需调用 Cargo 或执行目标项目代码。
