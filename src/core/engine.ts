@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { RustGraph } from "../languages/rust.js";
 import { languageConfiguration, TypeScriptGraph } from "../languages/typescript.js";
 import { projectPath, scanSources } from "./files.js";
 import { locate, located } from "./retrieval.js";
@@ -11,6 +12,7 @@ import type {
   LocateResult,
   SourceFile,
 } from "./types.js";
+
 export class GraphEngine {
   readonly root: string;
   private store: GraphStore;
@@ -29,7 +31,7 @@ export class GraphEngine {
     const changed = scan.files.filter((file) => previous.get(file.path) !== file.hash);
     const current = new Set(scan.files.map((file) => file.path));
     const deleted = [...previous.keys()].filter((path) => !current.has(path));
-    const configHash = languageConfiguration(this.root).hash;
+    const configHash = `rust-v1:${languageConfiguration(this.root).hash}`;
     this.lastChanged = changed.length;
     this.lastDeleted = deleted.length;
     if (
@@ -38,7 +40,14 @@ export class GraphEngine {
       deleted.length ||
       this.store.metadata("configHash") !== configHash
     ) {
-      const graph = this.parser.build(this.root, scan.files);
+      const graph = this.parser.build(
+        this.root,
+        scan.files.filter((file) => !/\.rs$/i.test(file.path)),
+      );
+      const rust = this.rustParser.build(scan.files.filter((file) => /\.rs$/i.test(file.path)));
+      graph.symbols.push(...rust.symbols);
+      graph.edges.push(...rust.edges);
+      graph.warnings.push(...rust.warnings);
       this.store.commit(scan.files, graph.symbols, graph.edges, configHash);
       this.warnings = [...scan.warnings, ...graph.warnings].slice(0, 12);
     }
@@ -101,4 +110,6 @@ export class GraphEngine {
   close(): void {
     this.store.close();
   }
+
+  private rustParser = new RustGraph();
 }

@@ -15,8 +15,9 @@ const excluded = new Set([
   "coverage",
   ".next",
   ".cache",
+  "target",
 ]);
-const sourcePattern = /\.(?:[cm]?[jt]sx?)$/i;
+const sourcePattern = /\.(?:[cm]?[jt]sx?|rs)$/i;
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }

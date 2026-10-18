@@ -5,7 +5,13 @@ export type SymbolKind =
   | "interface"
   | "type"
   | "variable"
-  | "property";
+  | "property"
+  | "struct"
+  | "enum"
+  | "trait"
+  | "module"
+  | "variant"
+  | "macro";
 export interface GraphSymbol {
   id: string;
   path: string;
