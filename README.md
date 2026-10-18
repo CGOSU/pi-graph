@@ -51,8 +51,9 @@ Agent 工具：
 - JS、TS、JSX、TSX、MJS、CJS、MTS、CTS，以及 Rust（`.rs`）、Vue SFC（`.vue`）；不索引 `.d.ts`。
 - TypeScript Compiler API 提取函数、方法、类、类型、顶层变量、属性及可解析调用/引用；支持导入别名、重导出和根配置的路径别名。
 - React：支持 JSX/TSX 函数/类组件、匿名默认导出、内联 `memo`/`forwardRef` 包装、Hook 解构状态；复用 TypeScript 的 JSX 组件引用、Hook/函数调用解析。不执行组件，也不推断自定义 HOC 的运行时语义。
-- Vue：通过官方 SFC 解析器提取普通 `<script>` 和 `<script setup>`（JS/TS/JSX/TSX），保留原 `.vue` 文件的行号和 UTF-16 源码范围；跨 JS/TS/Vue 的 `.vue` 导入和根配置路径别名可解析。组件和模板分别建 symbol，模板中的可辨识绑定、事件和组件标签引用标注为 `syntax`；支持 setup 绑定及 Options API 的 methods/computed/components。
-- Vue 不编译样式、不执行宏，不完整模拟 Options API 实例类型；外置 `src`、预处理模板、非 JS/TS 脚本报告诊断，`v-for`/`v-slot` 子树暂不推断绑定关系。模板表达式区分大小写；仅组件标签支持 kebab-case 名称映射。
+- Vue：通过官方 SFC 解析器提取普通 `<script>` 和 `<script setup>`（JS/TS/JSX/TSX），保留原 `.vue` 文件的行号和 UTF-16 源码范围；跨 JS/TS/Vue 的 `.vue` 导入和根配置路径别名可解析。组件和模板分别建 symbol，模板中的可辨识绑定、事件和组件标签引用标注为 `syntax`。支持 setup 绑定、Options API 的 methods/computed/components，以及静态 props（字符串数组或对象）、`data`/`setup` 直接返回的唯一静态对象成员。
+- Vue 模板支持静态可解析的 `v-for`/`v-slot` 绑定模式，包括解构与默认值；局部别名只在对应子树遮蔽同名外部绑定，循环源、默认值表达式及无关兄弟节点仍可解析。无法静态解析或有歧义的作用域会产生 warning，并跳过受影响的局部子树；不猜测动态键、展开或非静态返回中的绑定。模板表达式区分大小写；仅组件标签支持唯一匹配的 kebab-case 名称映射。
+- Vue 不编译样式、不执行宏，也不完整模拟 Options API 实例类型。外置 `src`、预处理模板和非 JS/TS 脚本会报告 warning；无法解析的模板表达式及不支持的局部作用域/选项形态也会报告 warning，不会将其伪装为已解析。
 - Rust 使用 Tree-sitter 提取函数、方法、struct、enum/variant、trait、模块、类型别名、字段、常量、静态变量和宏定义；包含关系与同文件可辨识调用标注为 `syntax`，不冒充类型解析结果。支持局部模块路径、`self`/`super`/`crate`、`Self` 和当前 impl 的 `self.method()`；不解析跨文件导入、任意接收者类型、宏展开或 Cargo/`cfg` 条件，不需要安装 Rust 工具链。
 - Tree-sitter 为原生依赖，支持的平台优先使用预编译包；无预编译包时安装需要 node-gyp 对应的 Python/C++ 构建环境。默认忽略 Rust 的 `target/` 构建目录。
 - SQLite + FTS5 持久化；默认缓存目录为项目下 `.pi-graph/`，建议加入目标项目的 `.gitignore`。

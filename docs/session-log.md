@@ -8,6 +8,12 @@
 
 ## 会话
 
+### 2026-10-18 — Vue 静态绑定与增量刷新
+
+- 扩展 Vue Options API 静态 props/data/setup 返回成员绑定，并将 `v-for`/`v-slot` 改为局部作用域解析；不支持或有歧义的形式产生 warning 并保守跳过相关子树。框架配置版本提升以重建旧 Vue 解析索引；增量回归覆盖绑定变化、作用域遮蔽、行号偏移、删除及跨文件组件引用。
+- 验证：`npm test` 通过，29/29。实际执行的 `npx biome check src/core/engine.ts tests/vue-incremental.test.ts` 未通过：报告增量测试文件 import 排序、`import type` 及格式问题；本次文档收尾未改代码。
+- 遗留范围见 [README](../README.md#实现边界)；Vue 不执行宏或动态选项，不完整模拟 Options API 实例类型。
+
 ### 2026-10-18 — Vue 与 React 支持
 
 - 新增 Vue SFC 虚拟脚本、组件/模板符号、模板绑定与组件导入关系；保留原始路径、Unicode/CRLF 范围，报告不支持的外置和预处理块。

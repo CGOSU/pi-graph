@@ -8,6 +8,12 @@
 
 ## 已确认决策
 
+### 2026-10-18 — Vue 静态选项绑定与模板局部作用域
+
+- 在不执行用户代码或宏的前提下，解析静态可确认的 Options API props、data/setup 直接返回对象成员，并在模板静态绑定模式下建立 `syntax` 引用。
+- 对 `v-for`/`v-slot` 使用显式局部作用域；无法唯一解析的选项或作用域以 warning 表示，只跳过受影响绑定/子树，不推断动态键、展开或不支持的模式。
+- 该能力不模拟完整 Vue 实例类型；现有 `.vue` 源码范围与图谱公共类型保持不变。详见 [README 支持边界](../README.md#实现边界)。
+
 ### 2026-10-18 — Vue 与 React 复用 TypeScript 图谱
 
 - Vue 使用官方 `@vue/compiler-sfc` 与 `@vue/compiler-dom` 解析，不引入运行时 Vue/React，也不执行目标项目代码。
