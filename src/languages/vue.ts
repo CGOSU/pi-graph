@@ -1,10 +1,9 @@
 import { basename } from "node:path";
-import { ElementTypes, NodeTypes, type TemplateChildNode } from "@vue/compiler-dom";
 import { parse, type SFCDescriptor } from "@vue/compiler-sfc";
 import ts from "typescript";
 import { hashContent } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
-import type { GraphEdge, GraphSymbol, SourceFile } from "../core/types.js";
+import type { GraphSymbol, SourceFile } from "../core/types.js";
 
 export interface VueSource {
   input: SourceFile;
@@ -103,83 +102,238 @@ export function prepareVue(file: SourceFile): VueSource {
     warnings,
   };
 }
-function identifiers(expression: string): string[] {
-  const source = ts.createSourceFile(
-    "template.tsx",
-    `(${expression})`,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
-  );
-  const names = new Set<string>();
-  const bindings = new Set<string>();
-  function bind(name: ts.BindingName): void {
-    if (ts.isIdentifier(name)) bindings.add(name.text);
-    else for (const element of name.elements) if (ts.isBindingElement(element)) bind(element.name);
+
+export interface VueOptionMember {
+  name: string;
+  node: ts.Node;
+  kind: "member" | "setup";
+  value?: ts.Expression;
+  shorthand?: boolean;
+  scope?: ts.FunctionLikeDeclaration;
+}
+
+export interface VueOptionIssue {
+  code:
+    | "ambiguous-option"
+    | "dynamic-option-shape"
+    | "duplicate-option-member"
+    | "non-static-return";
+  message: string;
+}
+
+export interface VueOptionAnalysis {
+  members: VueOptionMember[];
+  issues: VueOptionIssue[];
+}
+
+function staticPropertyName(name: ts.PropertyName | undefined): string | undefined {
+  if (!name) return undefined;
+  if (ts.isIdentifier(name)) return name.text;
+  if (ts.isStringLiteralLike(name) || ts.isNumericLiteral(name)) return name.text;
+  if (!ts.isComputedPropertyName(name)) return undefined;
+  const expression = name.expression;
+  return ts.isStringLiteralLike(expression) || ts.isNumericLiteral(expression)
+    ? expression.text
+    : undefined;
+}
+
+function uniqueMembers(members: VueOptionMember[]): VueOptionAnalysis {
+  const counts = new Map<string, number>();
+  for (const member of members) counts.set(member.name, (counts.get(member.name) ?? 0) + 1);
+  const duplicates = [...counts].filter(([, count]) => count > 1).map(([name]) => name);
+  return {
+    members: members.filter((member) => counts.get(member.name) === 1),
+    issues: duplicates.length
+      ? [
+          {
+            code: "duplicate-option-member",
+            message: `Duplicate static option members are not resolved: ${duplicates.join(", ")}`,
+          },
+        ]
+      : [],
+  };
+}
+
+function objectMembers(
+  object: ts.ObjectLiteralExpression,
+  kind: VueOptionMember["kind"],
+  scope?: ts.FunctionLikeDeclaration,
+): VueOptionAnalysis {
+  const members: VueOptionMember[] = [];
+  for (const property of object.properties) {
+    if (ts.isSpreadAssignment(property))
+      return {
+        members: [],
+        issues: [
+          {
+            code: "dynamic-option-shape",
+            message: "Spread option members are not statically resolved",
+          },
+        ],
+      };
+    const name = staticPropertyName(property.name);
+    if (name === undefined)
+      return {
+        members: [],
+        issues: [
+          {
+            code: "dynamic-option-shape",
+            message: "Dynamic option keys are not statically resolved",
+          },
+        ],
+      };
+    const shorthand = ts.isShorthandPropertyAssignment(property);
+    const value = ts.isPropertyAssignment(property)
+      ? property.initializer
+      : shorthand
+        ? property.name
+        : undefined;
+    members.push({ name, node: property, kind, value, shorthand, scope });
   }
+  return uniqueMembers(members);
+}
+
+function returnedObject(fn: ts.FunctionLikeDeclaration): ts.ObjectLiteralExpression | undefined {
+  let body = fn.body;
+  if (!body) return undefined;
+  while (ts.isParenthesizedExpression(body)) body = body.expression;
+  if (!ts.isBlock(body)) return ts.isObjectLiteralExpression(body) ? body : undefined;
+  const returns: ts.ReturnStatement[] = [];
   function visit(node: ts.Node): void {
-    if (ts.isParameter(node) || ts.isVariableDeclaration(node)) bind(node.name);
-    if (ts.isIdentifier(node)) {
-      const parent = node.parent;
-      if (
-        !(
-          (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-          (ts.isPropertyAssignment(parent) && parent.name === node) ||
-          (ts.isMethodDeclaration(parent) && parent.name === node)
-        )
-      )
-        names.add(node.text);
-    }
+    if (node !== body && ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) returns.push(node);
     ts.forEachChild(node, visit);
   }
-  visit(source);
-  return [...names].filter((name) => !bindings.has(name));
+  for (const statement of body.statements) visit(statement);
+  const [statement] = returns;
+  return returns.length === 1 &&
+    statement?.parent === body &&
+    statement.expression &&
+    ts.isObjectLiteralExpression(statement.expression)
+    ? statement.expression
+    : undefined;
 }
-export function vueTemplateEdges(
-  vue: VueSource,
-  lookup: (name: string, component: boolean) => GraphSymbol | undefined,
-): GraphEdge[] {
-  const template = vue.template;
-  const block = vue.descriptor.template;
-  if (!template || !block?.ast || block.src || (block.lang && block.lang !== "html")) return [];
-  const edges: GraphEdge[] = [];
-  const templateId = template.id;
-  function reference(name: string, line: number, component = false): void {
-    const target = lookup(name, component);
-    if (target)
-      edges.push({
-        source: templateId,
-        target: target.id,
-        kind: "references",
-        evidence: "syntax",
-        line,
-      });
-  }
-  function expression(text: string, line: number): void {
-    for (const name of identifiers(text)) reference(name, line);
-  }
-  function visit(node: TemplateChildNode): void {
-    if (node.type === NodeTypes.INTERPOLATION && node.content.type === NodeTypes.SIMPLE_EXPRESSION)
-      expression(node.content.content, node.loc.start.line);
-    if (node.type !== NodeTypes.ELEMENT) return;
-    // Scoped template bindings need Vue's full binding transform; do not guess their targets.
-    if (
-      node.props.some(
-        (prop) =>
-          prop.type === NodeTypes.DIRECTIVE && (prop.name === "for" || prop.name === "slot"),
-      )
+
+function optionFunction(
+  property: ts.ObjectLiteralElementLike,
+): ts.FunctionLikeDeclaration | undefined {
+  if (ts.isMethodDeclaration(property)) return property;
+  if (!ts.isPropertyAssignment(property)) return undefined;
+  const value = property.initializer;
+  return ts.isFunctionExpression(value) || ts.isArrowFunction(value) ? value : undefined;
+}
+
+export function analyzeVueOptions(vue: VueSource, source: ts.SourceFile): VueOptionAnalysis {
+  const issues: VueOptionIssue[] = [];
+  const defaults = source.statements.filter(
+    (statement): statement is ts.ExportAssignment =>
+      ts.isExportAssignment(statement) && !statement.isExportEquals,
+  );
+  if (defaults.length !== 1)
+    return {
+      members: [],
+      issues: [
+        {
+          code: "ambiguous-option",
+          message: `${vue.input.path}: default Options API object is not uniquely identifiable`,
+        },
+      ],
+    };
+  let options = defaults[0]?.expression;
+  if (options && ts.isCallExpression(options)) options = options.arguments[0];
+  if (!options || !ts.isObjectLiteralExpression(options)) return { members: [], issues };
+
+  if (
+    options.properties.some(
+      (property) =>
+        ts.isSpreadAssignment(property) ||
+        (property.name !== undefined &&
+          ts.isComputedPropertyName(property.name) &&
+          staticPropertyName(property.name) === undefined),
     )
-      return;
-    if (node.tagType === ElementTypes.COMPONENT) reference(node.tag, node.loc.start.line, true);
-    for (const prop of node.props) {
-      if (prop.type !== NodeTypes.DIRECTIVE) continue;
-      if (prop.exp?.type === NodeTypes.SIMPLE_EXPRESSION)
-        expression(prop.exp.content, prop.loc.start.line);
-      if (prop.arg?.type === NodeTypes.SIMPLE_EXPRESSION && !prop.arg.isStatic)
-        expression(prop.arg.content, prop.loc.start.line);
-    }
-    for (const child of node.children) visit(child);
+  )
+    return {
+      members: [],
+      issues: [
+        {
+          code: "dynamic-option-shape",
+          message: "Vue Options API object contains spreads or non-static keys",
+        },
+      ],
+    };
+
+  const optionProperties = new Map<string, ts.ObjectLiteralElementLike[]>();
+  for (const property of options.properties) {
+    const name = staticPropertyName(property.name);
+    if (name !== "props" && name !== "data" && name !== "setup") continue;
+    const entries = optionProperties.get(name) ?? [];
+    entries.push(property);
+    optionProperties.set(name, entries);
   }
-  for (const child of block.ast.children) visit(child);
-  return edges;
+  const members: VueOptionMember[] = [];
+  for (const name of ["props", "data", "setup"] as const) {
+    const entries = optionProperties.get(name);
+    if (entries && entries.length !== 1) {
+      issues.push({
+        code: "ambiguous-option",
+        message: `Repeated Vue ${name} options are not statically resolved`,
+      });
+      continue;
+    }
+    const property = entries?.[0];
+    if (!property) continue;
+    if (name === "props") {
+      if (!ts.isPropertyAssignment(property)) {
+        issues.push({
+          code: "dynamic-option-shape",
+          message: "Vue props option is not a static value",
+        });
+        continue;
+      }
+      const initializer = property.initializer;
+      if (ts.isArrayLiteralExpression(initializer)) {
+        const names = initializer.elements.filter(ts.isStringLiteralLike);
+        if (
+          initializer.elements.some(ts.isSpreadElement) ||
+          names.length !== initializer.elements.length
+        ) {
+          issues.push({
+            code: "dynamic-option-shape",
+            message: "Vue props arrays must contain only static strings and no spreads",
+          });
+          continue;
+        }
+        const result = uniqueMembers(
+          names.map((element) => ({ name: element.text, node: element, kind: "member" as const })),
+        );
+        members.push(...result.members);
+        issues.push(...result.issues);
+      } else if (ts.isObjectLiteralExpression(initializer)) {
+        const result = objectMembers(initializer, "member");
+        members.push(...result.members);
+        issues.push(...result.issues);
+      } else {
+        issues.push({
+          code: "dynamic-option-shape",
+          message: "Vue props option is not a static object or string array",
+        });
+      }
+      continue;
+    }
+    const fn = optionFunction(property);
+    const object = fn && returnedObject(fn);
+    if (!object) {
+      issues.push({
+        code: "non-static-return",
+        message: `Vue ${name} must directly return a single static object for member lookup`,
+      });
+      continue;
+    }
+    const result = objectMembers(object, name === "setup" ? "setup" : "member", fn);
+    members.push(...result.members);
+    issues.push(...result.issues);
+  }
+  return { members, issues };
 }
+
+export { vueTemplateEdges } from "./vue-template.js";

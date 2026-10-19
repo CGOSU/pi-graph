@@ -22,6 +22,7 @@
 
 ## 最近一次更新
 
+- 2026-10-19：Vue 静态 Options API 绑定、模板局部作用域和增量刷新改动已核验并独立交付；当前支持边界见 [README](../README.md#实现边界)，本轮验证见 [会话记录](session-log.md)。
 - 2026-10-18：补齐 Vue 静态 Options API 绑定、模板局部作用域和增量刷新回归；边界及验证见 [README](../README.md#实现边界) 与 [会话记录](session-log.md)。
 - 2026-10-18：新增 Vue SFC 与 React 框架回归支持。
 - 2026-10-18：新增 Rust 语法层索引，保留 JS/TS 类型解析链路。

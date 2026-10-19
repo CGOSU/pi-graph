@@ -147,29 +147,287 @@ test("Vue normal scripts, Options API methods, setup JSX and malformed/external 
   }
 });
 
-test("Vue template scopes and expression case do not create guessed references", async () => {
+test("Vue Options API static props, data and setup members bind their declarations", async () => {
+  const f = await fixture({
+    "OptionsArray.vue": `<script lang="ts">
+const arrayProp = "script-level declaration";
+export default {
+  props: ["arrayProp", "duplicate", "duplicate"],
+  data() { return { count: 0 }; },
+  setup() {
+    const localValue = 1;
+    const returnedValue = 2;
+    return { exposedValue: localValue, returnedValue };
+  },
+  methods: { stop() {} },
+  computed: { ready() { return true; } },
+};
+</script>
+<template>{{ arrayProp }} {{ count }} {{ exposedValue }} {{ returnedValue }} {{ duplicate }} <button @click="stop" /> {{ ready }}</template>`,
+    "OptionsObject.vue": `<script>
+export default { props: { objectProp: String } };
+</script>
+<template>{{ objectProp }}</template>`,
+    "OptionsUnsupported.vue": `<script>
+const dynamicKey = "dynamic";
+export default {
+  props: { [dynamicKey]: String },
+  data() { return { ...initialState, hidden: 1 }; },
+  setup() {
+    if (true) return { ambiguous: firstValue };
+    return { ambiguous: secondValue };
+  },
+};
+</script>
+<template>{{ dynamic }} {{ hidden }} {{ ambiguous }}</template>`,
+    "OptionsOuterDynamic.vue": `<script>
+export default { ...sharedOptions, props: ["outerProp"] };
+</script>
+<template>{{ outerProp }}</template>`,
+  });
+  try {
+    const templateFor = async (path: string) => {
+      const template = (
+        await f.engine.locate({ query: "template", scope: path, limit: 10 })
+      ).results.find((symbol) => symbol.kind === "template");
+      assert(template);
+      return f.engine.inspect({ id: template.id, neighbors: 10 });
+    };
+    const arrayDetail = await templateFor("OptionsArray.vue");
+    const arrayTargets = new Map(
+      arrayDetail.relations
+        .filter((edge) => edge.kind === "references")
+        .map((edge) => {
+          const target = arrayDetail.neighbors.find((symbol) => symbol.id === edge.target);
+          return [target?.name, target];
+        }),
+    );
+    const inspectArrayTarget = async (name: string) => {
+      const target = arrayTargets.get(name);
+      assert(target);
+      return f.engine.inspect({ id: target.id });
+    };
+    for (const name of ["arrayProp", "count", "localValue", "returnedValue", "stop", "ready"])
+      assert(arrayTargets.has(name), name);
+    assert(!arrayTargets.has("duplicate"));
+    assert.equal(arrayTargets.get("arrayProp")?.kind, "property");
+    assert.equal(arrayTargets.get("count")?.kind, "property");
+    assert.equal(arrayTargets.get("localValue")?.name, "localValue");
+    assert.equal(arrayTargets.get("localValue")?.kind, "variable");
+    assert.equal((await inspectArrayTarget("arrayProp")).source, '"arrayProp"');
+    assert.equal((await inspectArrayTarget("count")).source, "count: 0");
+    assert.match((await inspectArrayTarget("localValue")).source, /localValue = 1/);
+    assert.match((await inspectArrayTarget("returnedValue")).source, /returnedValue = 2/);
+
+    const objectDetail = await templateFor("OptionsObject.vue");
+    const objectReference = objectDetail.relations.find((edge) => edge.kind === "references");
+    assert(objectReference);
+    const objectTarget = objectDetail.neighbors.find(
+      (symbol) => symbol.id === objectReference.target,
+    );
+    assert(objectTarget);
+    assert.equal(objectTarget.name, "objectProp");
+    assert.equal(objectTarget.kind, "property");
+    assert.equal((await f.engine.inspect({ id: objectTarget.id })).source, "objectProp: String");
+
+    const unsupported = await templateFor("OptionsUnsupported.vue");
+    assert.equal(unsupported.relations.filter((edge) => edge.kind === "references").length, 0);
+    assert(
+      f.engine
+        .status()
+        .warnings.some(
+          (warning) =>
+            warning.includes("OptionsUnsupported.vue") && warning.includes("dynamic-option-shape"),
+        ),
+    );
+
+    const outerDynamic = await templateFor("OptionsOuterDynamic.vue");
+    assert.equal(outerDynamic.relations.filter((edge) => edge.kind === "references").length, 0);
+    assert(
+      f.engine
+        .status()
+        .warnings.some(
+          (warning) =>
+            warning.includes("OptionsOuterDynamic.vue") && warning.includes("dynamic-option-shape"),
+        ),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Vue v-for scopes bind sources, mask aliases and restore sibling bindings", async () => {
   const f = await fixture({
     "Panel.vue": `<script setup lang="ts">
-const Item = 'outer'; const ITEM = 'different case'; const items = [];
+import LoopChild from "./LoopChild.vue";
+const items = [];
+const item = "outer item";
+const index = 0;
+const local = "outer local";
+const name = "outer name";
+const fallback = 1;
+const outer = "outside";
+const tail = "tail";
 function stop() {}
 </script>
 <template>
-<div v-for="Item in items">{{ Item }}<button @click="stop" /></div>
-<div>{{ item }}</div>
-<div>{{ [1].map(Item => Item) }}</div>
-<button @click="stop" />
+<section v-for="(item, index) in items" v-if="index" :data-index="index">
+  {{ item }} {{ index }} {{ outer }}
+  <div v-for="{ id: local = fallback, nested: { name } } of item.children">
+    {{ local }} {{ name }} {{ item }} {{ outer }}
+    <LoopChild :value="local" />
+    <button @click="stop(local, name)" />
+  </div>
+</section>
+<p>{{ tail }}</p>
+</template>`,
+    "LoopChild.vue": "<template><span /></template>",
+    "ScopeExit.vue": `<script setup lang="ts">
+const Item = "outer Item";
+const item = "different case";
+const items = [];
+</script>
+<template>
+<div v-for="Item in items">{{ Item }}</div>
+<p>{{ Item }} {{ item }}</p>
+</template>`,
+  });
+  try {
+    const templateFor = async (path: string) => {
+      const template = (
+        await f.engine.locate({ query: "template", scope: path, limit: 10 })
+      ).results.find((symbol) => symbol.kind === "template");
+      assert(template);
+      const detail = await f.engine.inspect({ id: template.id, neighbors: 10 });
+      const lines = new Map<string, number>();
+      for (const edge of detail.relations.filter((relation) => relation.kind === "references")) {
+        const target = detail.neighbors.find((symbol) => symbol.id === edge.target);
+        if (target) lines.set(target.name, edge.line);
+      }
+      return { template, detail, lines };
+    };
+
+    const panel = await templateFor("Panel.vue");
+    assert.equal(panel.lines.get("items"), 14);
+    assert.equal(panel.lines.get("index"), 14);
+    assert.equal(panel.lines.get("fallback"), 16);
+    assert.equal(panel.lines.get("outer"), 17);
+    assert.equal(panel.lines.get("stop"), 19);
+    assert.equal(panel.lines.get("LoopChild"), 18);
+    assert.equal(panel.lines.get("tail"), 22);
+    for (const localName of ["item", "local", "name"])
+      assert(!panel.lines.has(localName), localName);
+    assert(
+      panel.detail.relations
+        .filter((edge) => edge.kind === "references")
+        .every((edge) => edge.evidence === "syntax"),
+    );
+
+    const scopeExit = await templateFor("ScopeExit.vue");
+    assert.equal(scopeExit.lines.get("items"), 7);
+    assert.equal(scopeExit.lines.get("Item"), 8);
+    assert.equal(scopeExit.lines.get("item"), 8);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Vue v-slot scopes handle defaults, nested aliases and dynamic slot names", async () => {
+  const f = await fixture({
+    "SlotPanel.vue": `<script setup lang="ts">
+import SlotComp from "./SlotComp.vue";
+import InnerSlot from "./InnerSlot.vue";
+import LeafComp from "./LeafComp.vue";
+const slotName = "header";
+const slotProp = "outer prop";
+const slotValue = "outer value";
+const outer = "outside";
+const fallback = "fallback";
+function stop() {}
+</script>
+<template>
+<SlotComp v-slot:[slotName]="{ slotProp = fallback, value: slotValue }">
+  {{ slotProp }} {{ slotValue }}
+  <button @click="stop(slotProp, slotValue); stop(outer)" />
+  <InnerSlot v-slot="{ outer }">
+    {{ outer }} {{ slotProp }} {{ slotValue }}
+    <LeafComp />
+  </InnerSlot>
+  {{ outer }} {{ slotProp }} {{ slotValue }}
+</SlotComp>
+<p>{{ slotProp }} {{ slotValue }}</p>
+</template>`,
+    "SlotComp.vue": "<template><slot /></template>",
+    "InnerSlot.vue": "<template><slot /></template>",
+    "LeafComp.vue": "<template><span /></template>",
+  });
+  try {
+    const template = (
+      await f.engine.locate({ query: "template", scope: "SlotPanel.vue", limit: 10 })
+    ).results.find((symbol) => symbol.kind === "template");
+    assert(template);
+    const detail = await f.engine.inspect({ id: template.id, neighbors: 10 });
+    const lines = new Map<string, number>();
+    for (const edge of detail.relations.filter((relation) => relation.kind === "references")) {
+      const target = detail.neighbors.find((symbol) => symbol.id === edge.target);
+      if (target) lines.set(target.name, edge.line);
+    }
+    assert.equal(lines.get("slotName"), 13);
+    assert.equal(lines.get("fallback"), 13);
+    assert.equal(lines.get("stop"), 15);
+    assert.equal(lines.get("outer"), 20);
+    assert.equal(lines.get("slotProp"), 22);
+    assert.equal(lines.get("slotValue"), 22);
+    assert.equal(lines.get("SlotComp"), 13);
+    assert.equal(lines.get("InnerSlot"), 16);
+    assert.equal(lines.get("LeafComp"), 18);
+    assert(
+      detail.relations
+        .filter((edge) => edge.kind === "references")
+        .every((edge) => edge.evidence === "syntax"),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Vue unsupported v-for bindings skip only their local subtree", async () => {
+  const f = await fixture({
+    "UnsupportedLoop.vue": `<script setup lang="ts">
+const items = [];
+const outer = true;
+const invalid = { value: 1 };
+</script>
+<template>
+<div v-for="invalid.value in items">{{ outer }} {{ invalid }}</div>
+<p>{{ outer }}</p>
 </template>`,
   });
   try {
     const template = (
-      await f.engine.locate({ query: "template", scope: "Panel.vue", limit: 10 })
-    ).results.find((s) => s.kind === "template");
+      await f.engine.locate({ query: "template", scope: "UnsupportedLoop.vue", limit: 10 })
+    ).results.find((symbol) => symbol.kind === "template");
     assert(template);
     const detail = await f.engine.inspect({ id: template.id, neighbors: 10 });
-    const references = detail.relations
-      .filter((e) => e.kind === "references")
-      .map((e) => detail.neighbors.find((s) => s.id === e.target)?.name);
-    assert.deepEqual(references, ["stop"]);
+    const references = new Map(
+      detail.relations
+        .filter((edge) => edge.kind === "references")
+        .map((edge) => [
+          detail.neighbors.find((symbol) => symbol.id === edge.target)?.name,
+          edge.line,
+        ]),
+    );
+    assert.equal(references.get("items"), 7);
+    assert.equal(references.get("outer"), 8);
+    assert(!references.has("invalid"));
+    assert(
+      f.engine
+        .status()
+        .warnings.some(
+          (warning) =>
+            warning.includes("UnsupportedLoop.vue") && warning.includes("unsupported-v-for-scope"),
+        ),
+    );
   } finally {
     await f.cleanup();
   }

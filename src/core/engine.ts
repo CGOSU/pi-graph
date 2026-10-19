@@ -31,7 +31,7 @@ export class GraphEngine {
     const changed = scan.files.filter((file) => previous.get(file.path) !== file.hash);
     const current = new Set(scan.files.map((file) => file.path));
     const deleted = [...previous.keys()].filter((path) => !current.has(path));
-    const configHash = `frameworks-v1:rust-v1:${languageConfiguration(this.root).hash}`;
+    const configHash = `frameworks-v2:rust-v1:${languageConfiguration(this.root).hash}`;
     this.lastChanged = changed.length;
     this.lastDeleted = deleted.length;
     if (

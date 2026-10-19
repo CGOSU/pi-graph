@@ -3,7 +3,7 @@ import ts from "typescript";
 import { hashContent, normalizePath } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
-import { prepareVue, vueTemplateEdges } from "./vue.js";
+import { analyzeVueOptions, prepareVue, vueTemplateEdges } from "./vue.js";
 
 interface Declaration {
   node: ts.Node;
@@ -178,6 +178,7 @@ export class TypeScriptGraph {
     );
     const edges: GraphEdge[] = [];
     const byNode = new Map<ts.Node, GraphSymbol>();
+    const vueMembersByPath = new Map<string, ReturnType<typeof analyzeVueOptions>>();
     const roots = this.program
       .getSourceFiles()
       .filter((source) => inputs.has(resolve(source.fileName)));
@@ -270,6 +271,13 @@ export class TypeScriptGraph {
         ts.forEachChild(node, (child) => visit(child, owner));
       }
       visit(source);
+      if (vue) {
+        const analysis = analyzeVueOptions(vue, source);
+        vueMembersByPath.set(resolve(source.fileName), analysis);
+        warnings.push(
+          ...analysis.issues.map((issue) => `${vue.input.path}: ${issue.code}: ${issue.message}`),
+        );
+      }
     }
     const resolveSymbol = (input: ts.Symbol | undefined): GraphSymbol | undefined => {
       let symbol = input;
@@ -284,17 +292,75 @@ export class TypeScriptGraph {
     };
     const resolveTarget = (node: ts.Node): GraphSymbol | undefined =>
       resolveSymbol(checker.getSymbolAtLocation(node));
+    function createVueSymbol(
+      source: ts.SourceFile,
+      vue: NonNullable<ReturnType<typeof vueByPath.get>>,
+      node: ts.Node,
+      name: string,
+      kind: SymbolKind,
+    ): GraphSymbol {
+      const existing = byNode.get(node);
+      if (existing) return existing;
+      const path = vue.input.path;
+      const qualifiedName = name;
+      const baseId = `${path}#${qualifiedName}:${kind}`;
+      let id = baseId;
+      let occurrence = 0;
+      while (symbols.some((symbol) => symbol.id === id)) {
+        occurrence += 1;
+        id = `${baseId}:${occurrence}`;
+      }
+      const start = node.getStart(source);
+      const end = node.getEnd();
+      const text = source.text.slice(start, end);
+      const line = source.getLineAndCharacterOfPosition(start).line + 1;
+      const symbol: GraphSymbol = {
+        id,
+        path,
+        name,
+        qualifiedName,
+        kind,
+        start,
+        end,
+        startLine: line,
+        endLine: source.getLineAndCharacterOfPosition(end).line + 1,
+        signature: `${kind} ${name}`,
+        summary: text.split(/\r?\n/)[0]?.slice(0, 180) ?? name,
+        excerpt: text.slice(0, 260),
+        document: searchDocument([name, qualifiedName, path, text.slice(0, 8000)].join(" ")),
+        hash: hashContent(text),
+        parentId: vue.component.id,
+        exported: false,
+      };
+      symbols.push(symbol);
+      byNode.set(node, symbol);
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name))
+        byNode.set(node.name, symbol);
+      edges.push({
+        source: vue.component.id,
+        target: symbol.id,
+        kind: "contains",
+        evidence: "syntax",
+        line,
+      });
+      return symbol;
+    }
     for (const source of roots) {
       const vue = vueByPath.get(resolve(source.fileName));
       if (vue) {
-        const bindings = new Map<string, GraphSymbol>();
+        const bindingCandidates = new Map<string, Map<string, GraphSymbol>>();
+        function addBinding(name: string, target: GraphSymbol): void {
+          const candidates = bindingCandidates.get(name) ?? new Map<string, GraphSymbol>();
+          candidates.set(target.id, target);
+          bindingCandidates.set(name, candidates);
+        }
         if (vue.descriptor.scriptSetup) {
           for (const symbol of checker.getSymbolsInScope(
             source,
             ts.SymbolFlags.Value | ts.SymbolFlags.Alias,
           )) {
             const target = resolveSymbol(symbol);
-            if (target) bindings.set(symbol.name, target);
+            if (target) addBinding(symbol.name, target);
           }
         }
         for (const statement of source.statements) {
@@ -319,20 +385,77 @@ export class TypeScriptGraph {
                 : ts.isPropertyAssignment(member) && ts.isIdentifier(member.initializer)
                   ? resolveTarget(member.initializer)
                   : byNode.get(member);
-              if (target) bindings.set(member.name.getText(source).replace(/['"]/g, ""), target);
+              if (target) addBinding(member.name.getText(source).replace(/['"]/g, ""), target);
             }
           }
         }
+        for (const member of vueMembersByPath.get(resolve(source.fileName))?.members ?? []) {
+          let target: GraphSymbol | undefined;
+          if (member.kind === "setup" && member.value && ts.isIdentifier(member.value)) {
+            target = member.shorthand
+              ? resolveSymbol(
+                  checker.getShorthandAssignmentValueSymbol(
+                    member.node as ts.ShorthandPropertyAssignment,
+                  ),
+                )
+              : resolveTarget(member.value);
+            if (!target && member.scope) {
+              let valueSymbol = member.shorthand
+                ? checker.getShorthandAssignmentValueSymbol(
+                    member.node as ts.ShorthandPropertyAssignment,
+                  )
+                : checker.getSymbolAtLocation(member.value);
+              if (valueSymbol && valueSymbol.flags & ts.SymbolFlags.Alias)
+                valueSymbol = checker.getAliasedSymbol(valueSymbol);
+              const declarations = [
+                ...new Set([
+                  ...(valueSymbol?.valueDeclaration ? [valueSymbol.valueDeclaration] : []),
+                  ...(valueSymbol?.declarations ?? []),
+                ]),
+              ];
+              const [declaration] = declarations;
+              let scope: ts.Node | undefined = declaration;
+              while (scope && scope !== member.scope) scope = scope.parent;
+              if (
+                declaration &&
+                scope === member.scope &&
+                declaration.getSourceFile() === source &&
+                ts.isVariableDeclaration(declaration) &&
+                ts.isIdentifier(declaration.name)
+              )
+                target = createVueSymbol(
+                  source,
+                  vue,
+                  declaration,
+                  declaration.name.text,
+                  "variable",
+                );
+            }
+          }
+          target ??= byNode.get(member.node);
+          target ??= createVueSymbol(source, vue, member.node, member.name, "property");
+          addBinding(member.name, target);
+        }
+        const bindings = new Map<string, GraphSymbol>();
+        for (const [name, candidates] of bindingCandidates)
+          if (candidates.size === 1) {
+            const [target] = candidates.values();
+            if (target) bindings.set(name, target);
+          }
         const canonical = (name: string) => name.replaceAll("-", "").toLowerCase();
-        edges.push(
-          ...vueTemplateEdges(vue, (name, component) => {
-            const exact = bindings.get(name);
-            if (exact || !component) return exact;
-            const matches = [...bindings].filter(
-              ([binding]) => canonical(binding) === canonical(name),
-            );
-            return matches.length === 1 ? matches[0]?.[1] : undefined;
-          }),
+        const templateAnalysis = vueTemplateEdges(vue, (name, component) => {
+          const exact = bindings.get(name);
+          if (exact || !component) return exact;
+          const matches = [...bindings].filter(
+            ([binding]) => canonical(binding) === canonical(name),
+          );
+          return matches.length === 1 ? matches[0]?.[1] : undefined;
+        });
+        edges.push(...templateAnalysis.edges);
+        warnings.push(
+          ...templateAnalysis.issues.map(
+            (issue) => `${vue.input.path}: ${issue.code}: ${issue.message} (line ${issue.line})`,
+          ),
         );
       }
       function visit(node: ts.Node, parent?: GraphSymbol): void {

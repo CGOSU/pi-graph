@@ -8,6 +8,12 @@
 
 ## 会话
 
+### 2026-10-19 — Vue 静态绑定与增量刷新收尾
+
+- 核对并交付 Vue Options API 静态 props/data/setup 成员绑定、`v-for`/`v-slot` 局部作用域及增量刷新回归；README 已包含真实支持边界，本次无需重复修改。Rust 后续模块/use 与显式类型关联的待实现边界另记于 [设计决策](decisions.md)。
+- 验证：`npm run build` 通过；`node --test dist/tests/frameworks.test.js dist/tests/vue-incremental.test.js` 通过，11/11；`npx biome check src/core/engine.ts src/languages/typescript.ts src/languages/vue.ts src/languages/vue-template.ts tests/frameworks.test.ts tests/vue-incremental.test.ts` 通过，6 files，无修改。
+- 遗留：Rust 跨文件与显式类型关联尚待实现及验证。
+
 ### 2026-10-18 — Vue 静态绑定与增量刷新
 
 - 扩展 Vue Options API 静态 props/data/setup 返回成员绑定，并将 `v-for`/`v-slot` 改为局部作用域解析；不支持或有歧义的形式产生 warning 并保守跳过相关子树。框架配置版本提升以重建旧 Vue 解析索引；增量回归覆盖绑定变化、作用域遮蔽、行号偏移、删除及跨文件组件引用。
