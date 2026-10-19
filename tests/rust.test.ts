@@ -23,6 +23,19 @@ mod nested { pub fn clear_loading() {} pub fn stop() { clear_loading(); } }
 macro_rules! cancel_log { () => {} }
 `;
 
+type RustFixture = Awaited<ReturnType<typeof fixture>>;
+async function rustCalls(f: RustFixture, name: string): Promise<string[]> {
+  const symbol = (await f.engine.locate({ query: name, limit: 10 })).results.find(
+    (item) => item.name === name || item.name.endsWith(`::${name}`),
+  );
+  assert(symbol, name);
+  const detail = await f.engine.inspect({ id: symbol.id, neighbors: 10 });
+  return detail.relations
+    .filter((edge) => edge.source === symbol.id && edge.kind === "calls")
+    .map((edge) => detail.neighbors.find((neighbor) => neighbor.id === edge.target)?.name ?? "")
+    .sort();
+}
+
 test("Rust symbols, syntax calls, containment and Unicode source survive locate/inspect", async () => {
   const f = await fixture({ "src/lib.rs": rustSource });
   try {
@@ -150,6 +163,7 @@ fn entry() { inner::local(); Task::new(); }
 fn shadow_parameter(finish: fn()) { finish(); }
 fn shadow_local() { let finish = || {}; finish(); }
 fn arbitrary_receiver(task: Task) { task.finish(); }
+fn inferred_receiver() { let task = Task::new(); task.finish(); }
 fn generic() { finish::<u8>(); }
 `,
   });
@@ -172,14 +186,167 @@ fn generic() { finish::<u8>(); }
       "inner::isolated",
       "shadow_parameter",
       "shadow_local",
-      "arbitrary_receiver",
     ])
       assert.deepEqual(await calls(name), [], name);
+    assert.deepEqual(await calls("arbitrary_receiver"), ["Task::finish"]);
+    assert.deepEqual(await calls("inferred_receiver"), ["Task::new"]);
     assert.deepEqual(await calls("generic"), ["finish"]);
     const drop = (await f.engine.locate({ query: "drop", limit: 10 })).results.find(
       (s) => s.name === "Task as Drop::drop",
     );
     assert(drop);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Rust resolves crate module files, nested uses, aliases and explicit paths", async () => {
+  const f = await fixture({
+    "src/lib.rs": `mod parent;
+use crate::parent::{self, target as renamed, Widget as Alias};
+use crate::parent::{nested::{self, run as nested_run}};
+mod inline { pub fn inlined() { crate::parent::target(); super::parent::target(); } }
+pub fn root_call() { renamed(); parent::target(); crate::parent::target(); Alias::new(); parent::nested::run(); nested_run(); nested::run(); }
+`,
+    "src/parent/mod.rs": `pub fn target() {}
+pub struct Widget;
+impl Widget { pub fn new() -> Self { Widget } pub fn run(&self) {} }
+pub mod nested;
+`,
+    "src/parent/nested.rs": `use super::target as imported;
+fn local() {}
+pub fn run() { imported(); super::target(); crate::parent::target(); self::local(); }
+`,
+  });
+  try {
+    assert.deepEqual(await rustCalls(f, "root_call"), [
+      "parent::Widget::new",
+      "parent::nested::run",
+      "parent::target",
+    ]);
+    assert.deepEqual(await rustCalls(f, "inline::inlined"), ["parent::target"]);
+    assert.deepEqual(await rustCalls(f, "parent::nested::run"), [
+      "parent::nested::local",
+      "parent::target",
+    ]);
+    const root = (await f.engine.locate({ query: "root_call", limit: 10 })).results.find(
+      (item) => item.name === "root_call",
+    );
+    assert(root);
+    const detail = await f.engine.inspect({ id: root.id, neighbors: 10 });
+    assert(
+      detail.relations
+        .filter((edge) => edge.source === root.id && edge.kind === "calls")
+        .every((edge) => edge.evidence === "syntax"),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Rust resolves only explicit parameter and let types, respecting shadowing and generics", async () => {
+  const f = await fixture({
+    "src/lib.rs": `mod types;
+use crate::types::{Widget as Alias, State};
+fn parameter(widget: &Alias) { widget.run(); }
+fn annotated_let() { let mut widget: crate::types::Widget = todo!(); widget.run(); }
+fn enum_parameter(state: State) { state.reset(); }
+fn shadowed(widget: Alias) { { let widget: u32 = 0; widget.run(); } }
+fn unannotated_shadow(widget: Alias) { let widget = 0; widget.run(); }
+fn closure_shadow(widget: Alias) { let run = |widget| widget.run(); }
+fn match_shadow(widget: Alias, other: Option<Alias>) { match other { Some(widget) => widget.run(), _ => () } }
+fn for_shadow(widget: Alias, values: Vec<Alias>) { for widget in values { widget.run(); } }
+fn inferred() { let widget = Alias::new(); widget.run(); }
+fn generic<Widget>(widget: Widget) { widget.run(); }
+`,
+    "src/types.rs": `pub struct Widget;
+impl Widget { pub fn new() -> Self { Widget } pub fn run(&self) {} }
+pub enum State { Ready }
+impl State { pub fn reset(&self) {} }
+`,
+  });
+  try {
+    assert.deepEqual(await rustCalls(f, "parameter"), ["types::Widget::run"]);
+    assert.deepEqual(await rustCalls(f, "annotated_let"), ["types::Widget::run"]);
+    assert.deepEqual(await rustCalls(f, "enum_parameter"), ["types::State::reset"]);
+    assert.deepEqual(await rustCalls(f, "shadowed"), []);
+    assert.deepEqual(await rustCalls(f, "unannotated_shadow"), []);
+    assert.deepEqual(await rustCalls(f, "closure_shadow"), [], "closure parameter shadows outer type");
+    assert.deepEqual(await rustCalls(f, "match_shadow"), [], "match binding shadows outer type");
+    assert.deepEqual(await rustCalls(f, "for_shadow"), [], "loop binding shadows outer type");
+    assert.deepEqual(await rustCalls(f, "inferred"), ["types::Widget::new"]);
+    assert.deepEqual(await rustCalls(f, "generic"), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Rust leaves ambiguous, missing, glob and re-export targets unresolved", async () => {
+  const f = await fixture({
+    "src/lib.rs": `mod left;
+mod right;
+mod missing;
+use crate::left::work as duplicate;
+use crate::right::work as duplicate;
+use crate::left::*;
+pub use crate::right::forwarded as forwarded;
+fn ambiguous() { duplicate(); work(); forwarded(); crate::missing::absent(); }
+fn direct() { crate::left::work(); crate::right::work(); }
+`,
+    "src/left.rs": "pub fn work() {}",
+    "src/right.rs": "pub fn work() {} pub fn forwarded() {}",
+  });
+  try {
+    assert.deepEqual(await rustCalls(f, "ambiguous"), []);
+    assert.deepEqual(await rustCalls(f, "direct"), ["left::work", "right::work"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Rust does not link a module file shared by separate crate roots", async () => {
+  const f = await fixture({
+    "src/lib.rs": "mod shared; pub fn library_call() { shared::run(); }",
+    "src/main.rs": "mod shared; pub fn binary_call() { shared::run(); }",
+    "src/shared.rs": "pub fn run() {}",
+  });
+  try {
+    assert.deepEqual(await rustCalls(f, "library_call"), []);
+    assert.deepEqual(await rustCalls(f, "binary_call"), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Rust rebuilds cross-file edges after imports, target edits, renames and deletion", async () => {
+  const f = await fixture({
+    "src/lib.rs": "mod caller; mod target;",
+    "src/caller.rs": "use crate::target::work as call; pub fn invoke() { call(); }",
+    "src/target.rs": "pub fn work() {}",
+  });
+  try {
+    assert.deepEqual(await rustCalls(f, "invoke"), ["target::work"]);
+
+    await f.write("src/target.rs", "pub fn updated() {}");
+    assert.deepEqual(await rustCalls(f, "invoke"), []);
+
+    await f.write(
+      "src/caller.rs",
+      "use crate::target::updated as call; pub fn invoke() { call(); }",
+    );
+    assert.deepEqual(await rustCalls(f, "invoke"), ["target::updated"]);
+
+    await rm(join(f.root, "src/target.rs"));
+    await f.write("src/renamed.rs", "pub fn renamed_work() {}");
+    await f.write("src/lib.rs", "mod caller; mod renamed;");
+    await f.write(
+      "src/caller.rs",
+      "use crate::renamed::renamed_work as call; pub fn invoke() { call(); }",
+    );
+    assert.deepEqual(await rustCalls(f, "invoke"), ["renamed::renamed_work"]);
+
+    await rm(join(f.root, "src/renamed.rs"));
+    assert.deepEqual(await rustCalls(f, "invoke"), []);
   } finally {
     await f.cleanup();
   }

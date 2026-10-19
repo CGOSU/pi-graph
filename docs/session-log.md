@@ -8,6 +8,12 @@
 
 ## 会话
 
+### 2026-10-19 — Rust 跨文件关联与交付收尾
+
+- 完成 Rust 跨文件模块/use 解析、显式参数及 `let` 类型注解关联和保守的 inherent impl 调用关系；关系证据维持 `syntax`，不进行编译器类型推断。升级 Rust 解析配置版本，使未变化源码的旧持久化索引也重建；README、当前状态与决策记录已同步实际边界。新增 Rust 关系、遮蔽/歧义、增量更新和旧索引回归；未混入 Vue 交付。
+- 验证：`npm test` 通过，35/35；触发 TypeScript build 并执行全量 `dist/tests/*.test.js`。
+- 遗留：不支持边界见 [README](../README.md#实现边界)。
+
 ### 2026-10-19 — Vue 静态绑定与增量刷新收尾
 
 - 核对并交付 Vue Options API 静态 props/data/setup 成员绑定、`v-for`/`v-slot` 局部作用域及增量刷新回归；README 已包含真实支持边界，本次无需重复修改。Rust 后续模块/use 与显式类型关联的待实现边界另记于 [设计决策](decisions.md)。

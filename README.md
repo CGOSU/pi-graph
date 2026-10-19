@@ -54,7 +54,7 @@ Agent 工具：
 - Vue：通过官方 SFC 解析器提取普通 `<script>` 和 `<script setup>`（JS/TS/JSX/TSX），保留原 `.vue` 文件的行号和 UTF-16 源码范围；跨 JS/TS/Vue 的 `.vue` 导入和根配置路径别名可解析。组件和模板分别建 symbol，模板中的可辨识绑定、事件和组件标签引用标注为 `syntax`。支持 setup 绑定、Options API 的 methods/computed/components，以及静态 props（字符串数组或对象）、`data`/`setup` 直接返回的唯一静态对象成员。
 - Vue 模板支持静态可解析的 `v-for`/`v-slot` 绑定模式，包括解构与默认值；局部别名只在对应子树遮蔽同名外部绑定，循环源、默认值表达式及无关兄弟节点仍可解析。无法静态解析或有歧义的作用域会产生 warning，并跳过受影响的局部子树；不猜测动态键、展开或非静态返回中的绑定。模板表达式区分大小写；仅组件标签支持唯一匹配的 kebab-case 名称映射。
 - Vue 不编译样式、不执行宏，也不完整模拟 Options API 实例类型。外置 `src`、预处理模板和非 JS/TS 脚本会报告 warning；无法解析的模板表达式及不支持的局部作用域/选项形态也会报告 warning，不会将其伪装为已解析。
-- Rust 使用 Tree-sitter 提取函数、方法、struct、enum/variant、trait、模块、类型别名、字段、常量、静态变量和宏定义；包含关系与同文件可辨识调用标注为 `syntax`，不冒充类型解析结果。支持局部模块路径、`self`/`super`/`crate`、`Self` 和当前 impl 的 `self.method()`；不解析跨文件导入、任意接收者类型、宏展开或 Cargo/`cfg` 条件，不需要安装 Rust 工具链。
+- Rust 使用 Tree-sitter 提取函数、方法、struct、enum/variant、trait、模块、类型别名、字段、常量、静态变量和宏定义。包含关系及可辨识调用统一标注为 `syntax`，显式类型注解关联仅表示语法层关联，不是编译器类型解析或推断。基于已扫描文件支持 inline module、常规模块声明到唯一 `foo.rs`/`foo/mod.rs` 的映射、`lib.rs`/`main.rs` 等 crate root、嵌套模块，以及 `crate`/`self`/`super` 路径；支持模块作用域内简单、别名、分组/嵌套 use 和明确限定路径。函数/方法参数或 `let` 显式标注为唯一本地 struct/enum 类型时，可关联 inherent impl 方法及明确类型路径调用；普通引用、已支持 use 别名和 `self`/`Self` 也受限支持。歧义、缺失模块上下文或多个 crate root 共用模块文件时不猜测目标；不推断构造/返回/任意表达式类型，不支持 glob、pub use 重导出链、`extern crate`、`#[path]`、`cfg` 选择、宏生成、跨 crate/workspace、trait/泛型分派、类型别名展开、智能指针/Deref 或强制转换。无需安装 Rust 工具链。旧 Rust 解析配置版本的持久化索引会在刷新时重建，即使 Rust 源文件未变化。
 - Tree-sitter 为原生依赖，支持的平台优先使用预编译包；无预编译包时安装需要 node-gyp 对应的 Python/C++ 构建环境。默认忽略 Rust 的 `target/` 构建目录。
 - SQLite + FTS5 持久化；默认缓存目录为项目下 `.pi-graph/`，建议加入目标项目的 `.gitignore`。
 - 词法召回、camelCase 切分、中文双字切分及少量中英功能词映射；一跳局部图扩展、去重、预算裁剪。

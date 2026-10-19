@@ -3,18 +3,33 @@ import Rust from "tree-sitter-rust";
 import { hashContent } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
+import { linkRustProject } from "./rust-project.js";
 
-type Node = Parser.SyntaxNode;
-interface Entry {
-  node: Node;
+export type RustNode = Parser.SyntaxNode;
+export interface RustEntry {
+  node: RustNode;
   symbol: GraphSymbol;
-  implementation?: Node;
+  implementation?: RustNode;
+  modulePath: string[];
 }
-interface FileGraph {
+export interface RustModuleDeclaration {
+  name: string;
+  modulePath: string[];
+  inline: boolean;
+}
+export interface RustUseDeclaration {
+  node: RustNode;
+  modulePath: string[];
+}
+export interface RustFileGraph {
   symbols: GraphSymbol[];
   edges: GraphEdge[];
   warnings: string[];
+  entries: RustEntry[];
+  modules: RustModuleDeclaration[];
+  uses: RustUseDeclaration[];
 }
+type Node = RustNode;
 const kinds: Record<string, SymbolKind> = {
   function_item: "function",
   function_signature_item: "method",
@@ -71,11 +86,11 @@ function shadows(node: Node, scope: Node, name: string): boolean {
       patternContains(field(child, "pattern"), name),
   );
 }
-function callTarget(call: Node, owner: Entry, entries: Entry[]): Entry | undefined {
+function callTarget(call: Node, owner: RustEntry, entries: RustEntry[]): RustEntry | undefined {
   let expression = field(call, "function");
   if (expression?.type === "generic_function") expression = field(expression, "function");
   if (!expression) return undefined;
-  let candidates: Entry[] = [];
+  let candidates: RustEntry[] = [];
   if (expression.type === "identifier") {
     for (let scope: Node | null = call.parent; scope; scope = scope.parent) {
       if (shadows(call, scope, expression.text)) return undefined;
@@ -130,19 +145,37 @@ function callTarget(call: Node, owner: Entry, entries: Entry[]): Entry | undefin
   }
   return candidates.length === 1 ? candidates[0] : undefined;
 }
-function fileGraph(parser: Parser, file: SourceFile): FileGraph {
+function fileGraph(parser: Parser, file: SourceFile): RustFileGraph {
   const tree = parser.parse(file.content);
-  const entries: Entry[] = [];
+  const entries: RustEntry[] = [];
   const edges: GraphEdge[] = [];
+  const modules: RustModuleDeclaration[] = [];
+  const uses: RustUseDeclaration[] = [];
   const counters = new Map<string, number>();
   const warnings = tree.rootNode.hasError
     ? [`${file.path}: Rust syntax errors; index may be incomplete`]
     : [];
-  function visit(node: Node, parent?: GraphSymbol, namespace = "", implementation?: Node): void {
+  function visit(
+    node: Node,
+    parent?: GraphSymbol,
+    namespace = "",
+    implementation?: Node,
+    modulePath: string[] = [],
+  ): void {
     if (node.type === "ERROR" || node.type === "token_tree") return;
     let owner = parent;
     let prefix = namespace;
     let currentImpl = implementation;
+    const name = field(node, "name")?.text;
+    const childModulePath = node.type === "mod_item" && name ? [...modulePath, name] : modulePath;
+    if (node.type === "mod_item" && name)
+      modules.push({ name, modulePath, inline: !!field(node, "body") });
+    if (
+      node.type === "use_declaration" &&
+      (node.parent?.type === "source_file" ||
+        (node.parent?.type === "declaration_list" && node.parent.parent?.type === "mod_item"))
+    )
+      uses.push({ node, modulePath });
     if (node.type === "impl_item") {
       currentImpl = node;
       const trait = field(node, "trait");
@@ -152,7 +185,6 @@ function fileGraph(parser: Parser, file: SourceFile): FileGraph {
       owner = undefined;
     }
     const kind = kinds[node.type];
-    const name = field(node, "name")?.text;
     if (kind && name) {
       const qualifiedName = [prefix, name].filter(Boolean).join("::");
       const method =
@@ -201,9 +233,10 @@ function fileGraph(parser: Parser, file: SourceFile): FileGraph {
         symbolKind === "trait"
       )
         prefix = qualifiedName;
-      entries.push({ node, symbol: owner, implementation: currentImpl });
+      entries.push({ node, symbol: owner, implementation: currentImpl, modulePath });
     }
-    for (const child of node.namedChildren) visit(child, owner, prefix, currentImpl);
+    for (const child of node.namedChildren)
+      visit(child, owner, prefix, currentImpl, childModulePath);
   }
   visit(tree.rootNode);
   for (const entry of entries) {
@@ -249,6 +282,9 @@ function fileGraph(parser: Parser, file: SourceFile): FileGraph {
   }
   return {
     symbols: entries.map((entry) => entry.symbol),
+    entries,
+    modules,
+    uses,
     edges: [
       ...new Map(
         edges.map((edge) => [`${edge.source}|${edge.target}|${edge.kind}`, edge]),
@@ -259,24 +295,55 @@ function fileGraph(parser: Parser, file: SourceFile): FileGraph {
 }
 export class RustGraph {
   private parser = new Parser();
-  private cache = new Map<string, { hash: string; graph: FileGraph }>();
+  private cache = new Map<string, { hash: string; graph: RustFileGraph }>();
   constructor() {
     this.parser.setLanguage(Rust as Parser.Language);
   }
-  build(files: SourceFile[]): FileGraph {
-    const result: FileGraph = { symbols: [], edges: [], warnings: [] };
+  build(files: SourceFile[]): RustFileGraph {
+    const result: RustFileGraph = {
+      symbols: [],
+      edges: [],
+      warnings: [],
+      entries: [],
+      modules: [],
+      uses: [],
+    };
     const current = new Set(files.map((file) => file.path));
     for (const path of this.cache.keys()) if (!current.has(path)) this.cache.delete(path);
+    const graphs = new Map<string, RustFileGraph>();
     for (const file of files) {
       let cached = this.cache.get(file.path);
       if (cached?.hash !== file.hash) {
         cached = { hash: file.hash, graph: fileGraph(this.parser, file) };
         this.cache.set(file.path, cached);
       }
-      result.symbols.push(...cached.graph.symbols);
-      result.edges.push(...cached.graph.edges);
-      result.warnings.push(...cached.graph.warnings);
+      graphs.set(file.path, cached.graph);
     }
+    const project = linkRustProject(files, graphs);
+    for (const file of files) {
+      const graph = graphs.get(file.path);
+      if (!graph) continue;
+      result.symbols.push(
+        ...graph.symbols.map((symbol) => {
+          const qualifiedName = project.qualifiedNames.get(symbol.id);
+          return qualifiedName
+            ? {
+                ...symbol,
+                qualifiedName,
+                document: searchDocument([symbol.document, qualifiedName].join(" ")),
+              }
+            : symbol;
+        }),
+      );
+      result.edges.push(...graph.edges);
+      result.warnings.push(...graph.warnings);
+    }
+    result.edges.push(...project.edges);
+    result.edges = [
+      ...new Map(
+        result.edges.map((edge) => [`${edge.source}|${edge.target}|${edge.kind}`, edge]),
+      ).values(),
+    ];
     return result;
   }
 }
