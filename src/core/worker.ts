@@ -32,13 +32,22 @@ try {
 port.on("message", (request: WorkerRequest) => {
   queue = queue.then(async () => {
     const response: WorkerResponse = { id: request.id };
+    const flag = new Int32Array(request.cancellation);
+    const cancellation = {
+      throwIfAborted() {
+        if (Atomics.load(flag, 0)) throw new Error("Graph request aborted");
+      },
+    };
     try {
+      cancellation.throwIfAborted();
       if (request.operation === "locate")
-        response.result = await engine.locate(request.input as LocateInput);
+        response.result = await engine.locate(request.input as LocateInput, cancellation);
       else if (request.operation === "inspect")
-        response.result = await engine.inspect(request.input as InspectInput);
-      else response.result = await engine.refresh(request.operation === "rebuild");
+        response.result = await engine.inspect(request.input as InspectInput, cancellation);
+      else response.result = await engine.refresh(request.operation === "rebuild", cancellation);
+      cancellation.throwIfAborted();
     } catch (error) {
+      delete response.result;
       response.error = error instanceof Error ? error.message : String(error);
     }
     port.postMessage(response);

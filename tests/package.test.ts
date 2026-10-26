@@ -11,6 +11,8 @@ import {
   InteractiveMode,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { InspectResult, LocateResult } from "../src/core/types.js";
+import { locateText } from "../src/pi/extension.js";
 import { featureFiles, fixture } from "./helpers.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -59,9 +61,9 @@ test("real pi install in an isolated profile loads callable tools without touchi
       undefined,
       ctx,
     );
-    const data = result.details as { results: { id: string; name: string }[] };
+    const data = result.details as LocateResult;
     assert(data.results.some((symbol) => symbol.name === "cancelGeneration"));
-    assert(result.structuredContent);
+    assert.deepEqual(result.structuredContent, data);
     const inspect = extension.tools.get("graph_inspect");
     assert(inspect);
     const detail = await inspect.definition.execute(
@@ -76,6 +78,10 @@ test("real pi install in an isolated profile loads callable tools without touchi
         (content) => content.type === "text" && content.text.includes("generation"),
       ),
     );
+    const inspected = detail.details as InspectResult;
+    assert.deepEqual(detail.structuredContent, inspected);
+    assert.equal(inspected.symbol.id, data.results[0]?.id);
+    assert(inspected.source.length > 0);
     const renderer = Object.create(InteractiveMode.prototype) as LabelRenderer;
     assert.deepEqual(renderer.getCompactExtensionLabels([extension]), ["pi-graph"]);
   } finally {
@@ -83,6 +89,60 @@ test("real pi install in an isolated profile loads callable tools without touchi
     await f.cleanup();
   }
 });
+test("compact locate text preserves inspect IDs, relation endpoints and navigation evidence", async () => {
+  const f = await fixture(featureFiles);
+  try {
+    const result = await f.engine.locate({ query: "cancelGeneration", limit: 10 });
+    assert(result.relations.length > 0);
+    const text = locateText(result);
+    const normalized = text.replace(/\s+/g, " ");
+    const references = new Map(result.results.map((symbol, index) => [symbol.id, `#${index + 1}`]));
+    for (const symbol of result.results) {
+      assert.equal(text.split(symbol.id).length - 1, 1);
+      assert(
+        text.includes(
+          `${references.get(symbol.id)} ${symbol.path}:${symbol.lines[0]}–${symbol.lines[1]}`,
+        ),
+      );
+      assert(text.includes(symbol.reason));
+      assert(text.includes(symbol.evidence));
+      assert(normalized.includes(symbol.signature.replace(/\s+/g, " ").trim()));
+      assert.equal((await f.engine.inspect({ id: symbol.id })).symbol.id, symbol.id);
+    }
+    for (const edge of result.relations) {
+      assert(
+        text.includes(
+          `${references.get(edge.source)} --${edge.kind}--> ${references.get(edge.target)} (${edge.evidence})`,
+        ),
+      );
+    }
+    const edge = result.relations[0];
+    assert(edge);
+    const external = { ...edge, target: "external-symbol-id" };
+    const warning = "Index warning: unsupported source file";
+    const partial = locateText({ ...result, relations: [external], warnings: [warning] });
+    assert(partial.includes(external.target));
+    assert(partial.includes(warning));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("compact locate keeps warnings without inventing results on an empty search", () => {
+  const warning = "No matching symbols; this does not prove the feature is absent.";
+  const result: LocateResult = {
+    query: "unmatched query",
+    revision: 1,
+    retrieval: "lexical+graph",
+    results: [],
+    relations: [],
+    warnings: [warning],
+  };
+  const text = locateText(result);
+  assert(text.includes(warning));
+  assert(!text.includes("id:"));
+});
+
 interface LabelRenderer {
   getCompactExtensionLabel(
     path: string,

@@ -21,6 +21,83 @@ test("identifier splitting and Chinese query expansion", () => {
   assert.throws(() => safeScope("C:\\outside"));
   assert.equal(safeScope("./src\\auth/"), "src/auth");
 });
+test("exact identifiers outrank containing classes and similar names", async () => {
+  const f = await fixture({
+    "catalog.ts":
+      "export class CatalogService { refresh() { return 1; } } export function refreshCatalogService() { return 2; }",
+  });
+  try {
+    for (const query of ["CatalogService.refresh", "refreshCatalogService"]) {
+      const result = await f.engine.locate({ query });
+      assert.equal(result.results[0]?.name, query);
+      const target = result.results[0];
+      assert(target);
+      assert.equal((await f.engine.inspect({ id: target.id })).symbol.id, target.id);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+test("multi-concept queries favor behavior but literal fields remain searchable", async () => {
+  const f = await fixture({
+    "options.ts":
+      "export class Options { cancel = false; generation = false; loading = false; } export const options = new Options();",
+    "jobs.ts":
+      "import { options } from './options.js'; export function stopJob() { options.cancel = true; options.generation = false; options.loading = false; }",
+  });
+  try {
+    for (const query of ["cancel generation loading", "取消生成加载"]) {
+      const result = await f.engine.locate({ query, limit: 3 });
+      assert.equal(result.results[0]?.name, "stopJob", query);
+    }
+    const field = (await f.engine.locate({ query: "loading", limit: 3 })).results[0];
+    assert.equal(field?.name, "Options.loading");
+    assert.equal(field?.kind, "property");
+  } finally {
+    await f.cleanup();
+  }
+});
+test("Chinese prose keeps shared behavior above generic query helpers and fields", async () => {
+  const f = await fixture({
+    "service.ts":
+      "export class Scheduler { worker = { closed: false }; run(signal?: AbortSignal) { if (this.worker.closed || signal?.aborted) return; const timer = setTimeout(() => {}, 100); return timer; } }",
+    "text.ts":
+      "export function queryTokens(query: string) { return parseQuery(query); } export function parseQuery(query: string) { return query.split(' '); }",
+  });
+  try {
+    const result = await f.engine.locate({
+      query: "取消或超时后如何停止 worker 查询",
+      limit: 3,
+    });
+    assert.equal(result.results[0]?.name, "Scheduler.run");
+    const field = (await f.engine.locate({ query: "Scheduler.worker", limit: 3 })).results[0];
+    assert.equal(field?.name, "Scheduler.worker");
+    assert.equal(field?.kind, "property");
+  } finally {
+    await f.cleanup();
+  }
+});
+test("graph-only neighbors do not displace multi-word matches", async () => {
+  const f = await fixture({
+    "jobs.ts":
+      "export function cancelGeneration() { auditTelemetry(); } export function auditTelemetry() { return 1; } export function resetView() { return 'generation loading'; } export function resetProgress() { return 'generation loading'; }",
+  });
+  try {
+    const result = await f.engine.locate({ query: "cancel generation loading", limit: 3 });
+    assert(result.results.some((symbol) => symbol.name === "resetView"));
+    assert(result.results.some((symbol) => symbol.name === "resetProgress"));
+    assert(!result.results.some((symbol) => symbol.name === "auditTelemetry"));
+    const cancel = result.results.find((symbol) => symbol.name === "cancelGeneration");
+    assert(cancel);
+    const inspect = await f.engine.inspect({ id: cancel.id });
+    assert(inspect.neighbors.some((symbol) => symbol.name === "auditTelemetry"));
+    assert(
+      inspect.relations.some((edge) => edge.kind === "calls" && edge.evidence === "type-resolved"),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
 test("a single Chinese query finds the feature, not unrelated utilities", async () => {
   const f = await fixture(featureFiles);
   try {

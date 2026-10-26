@@ -15,6 +15,12 @@ const aliases: Record<string, string[]> = {
   过期: ["expire", "expiry", "ttl"],
   重试: ["retry"],
   超时: ["timeout"],
+  停止: ["stop", "abort", "cancel"],
+  刷新: ["refresh", "reload"],
+  文件: ["file", "files"],
+  哈希: ["hash"],
+  索引: ["index", "indexed", "indexing"],
+  查询: ["query", "search"],
   会话: ["session"],
   消息: ["message"],
   事件: ["event", "emit", "handler"],
@@ -64,11 +70,23 @@ export function tokens(text: string): string[] {
   }
   return [...new Set(result)];
 }
+export function queryTokenGroups(query: string): string[][] {
+  const groups: string[][] = [];
+  let remainder = query;
+  for (const [phrase, words] of Object.entries(aliases)) {
+    if (!query.includes(phrase)) continue;
+    const group = groups.find((candidate) => words.some((word) => candidate.includes(word)));
+    if (group) group.push(...[phrase, ...words].filter((word) => !group.includes(word)));
+    else groups.push([phrase, ...words]);
+    remainder = remainder.replaceAll(phrase, " ");
+  }
+  const literals = tokens(remainder).filter(
+    (term) => !groups.some((group) => group.includes(term)),
+  );
+  return [...groups, ...literals.map((term) => [term])].slice(0, 32);
+}
 export function queryTokens(query: string): string[] {
-  const expanded = tokens(query);
-  for (const [phrase, words] of Object.entries(aliases))
-    if (query.includes(phrase)) expanded.push(...words);
-  return [...new Set(expanded)].slice(0, 32);
+  return [...new Set(queryTokenGroups(query).flat())].slice(0, 32);
 }
 export function searchDocument(text: string): string {
   return tokens(text).join(" ");

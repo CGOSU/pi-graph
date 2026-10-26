@@ -3,11 +3,14 @@ import { Type } from "typebox";
 import { GraphClient } from "../core/client.js";
 import type { GraphStatus, InspectResult, LocateResult } from "../core/types.js";
 
-function locateText(result: LocateResult): string {
-  const lines = [`Query: ${result.query} | revision ${result.revision} | ${result.retrieval}`];
+export function locateText(result: LocateResult): string {
+  const lines = [`Revision ${result.revision} | ${result.retrieval}`];
+  const references = new Map(result.results.map((symbol, index) => [symbol.id, `#${index + 1}`]));
   for (const symbol of result.results) {
     lines.push(
-      symbol.path +
+      references.get(symbol.id) +
+        " " +
+        symbol.path +
         ":" +
         symbol.lines[0] +
         "–" +
@@ -18,16 +21,18 @@ function locateText(result: LocateResult): string {
         symbol.role +
         "]",
       `id: ${symbol.id}`,
-      symbol.signature,
-      symbol.reason,
-      symbol.evidence,
     );
+    const signature = symbol.signature.replace(/\s+/g, " ").trim();
+    const evidence = symbol.evidence.replace(/\s+/g, " ").trim();
+    if (signature && !evidence.includes(signature)) lines.push(symbol.signature);
+    lines.push(symbol.reason, symbol.evidence);
   }
   if (result.relations.length)
     lines.push(
       "Relations:",
       ...result.relations.map(
-        (edge) => `${edge.source} --${edge.kind}--> ${edge.target} (${edge.evidence})`,
+        (edge) =>
+          `${references.get(edge.source) ?? edge.source} --${edge.kind}--> ${references.get(edge.target) ?? edge.target} (${edge.evidence})`,
       ),
     );
   if (result.warnings.length) lines.push("Warnings:", ...result.warnings);

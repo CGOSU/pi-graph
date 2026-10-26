@@ -6,6 +6,7 @@ import type {
   InspectResult,
   LocateInput,
   LocateResult,
+  WorkerRequest,
   WorkerResponse,
 } from "./types.js";
 
@@ -51,18 +52,20 @@ export class GraphClient {
     if (signal?.aborted) return Promise.reject(new Error("Graph request aborted"));
     return new Promise<T>((resolve, reject) => {
       const id = ++this.nextId;
-      const abort = () => {
+      const cancellation = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+      const cancel = (error: Error) => {
         const request = this.pending.get(id);
         if (!request) return;
+        Atomics.store(cancellation, 0, 1);
         this.pending.delete(id);
         request.cleanup();
-        reject(new Error("Graph request aborted"));
+        request.reject(error);
       };
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        signal?.removeEventListener("abort", abort);
-        reject(new Error("Graph request timed out after 120 seconds"));
-      }, 120_000);
+      const abort = () => cancel(new Error("Graph request aborted"));
+      const timer = setTimeout(
+        () => cancel(new Error("Graph request timed out after 120 seconds")),
+        120_000,
+      );
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
@@ -72,7 +75,16 @@ export class GraphClient {
         },
       });
       signal?.addEventListener("abort", abort, { once: true });
-      this.worker.postMessage({ id, operation, input });
+      try {
+        this.worker.postMessage({
+          id,
+          operation,
+          input,
+          cancellation: cancellation.buffer,
+        } satisfies WorkerRequest);
+      } catch (error) {
+        cancel(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
   locate(input: LocateInput, signal?: AbortSignal): Promise<LocateResult> {

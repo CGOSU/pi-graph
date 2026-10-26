@@ -21,6 +21,7 @@
 
 ## 最近一次更新
 
+- 2026-10-26：完成增量检索与 worker 取消优化的统一文档收尾；公开边界见 [README](../README.md#实现边界)，固定样例测量与验证见 [会话记录](session-log.md)。
 - 2026-10-19：完成 Rust 跨文件模块/use、显式类型注解关联及旧持久化索引迁移；支持边界见 [README](../README.md#实现边界)，验证见 [会话记录](session-log.md)。
 - 2026-10-19：Vue 静态 Options API 绑定、模板局部作用域和增量刷新改动已核验并独立交付；当前支持边界见 [README](../README.md#实现边界)，本轮验证见 [会话记录](session-log.md)。
 - 2026-10-18：补齐 Vue 静态 Options API 绑定、模板局部作用域和增量刷新回归；边界及验证见 [README](../README.md#实现边界) 与 [会话记录](session-log.md)。

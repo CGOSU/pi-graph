@@ -2,7 +2,66 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { DatabaseSync } from "node:sqlite";
 import { GraphEngine } from "../src/core/engine.js";
+import { GraphStore } from "../src/core/store.js";
+import type { FileRecord, GraphEdge, GraphSymbol } from "../src/core/types.js";
+import { locateText } from "../src/pi/extension.js";
+
+function snapshot(path: string) {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const rows = (table: string) =>
+      (db.prepare(`SELECT data FROM ${table}`).all() as { data: string }[]).map((row) =>
+        JSON.parse(row.data),
+      );
+    const config = db.prepare("SELECT value FROM metadata WHERE key='configHash'").get() as
+      | { value: string }
+      | undefined;
+    if (!config) throw new Error("Benchmark snapshot has no configuration hash");
+    return {
+      files: db.prepare("SELECT path,hash FROM files").all() as unknown as FileRecord[],
+      symbols: rows("symbols") as GraphSymbol[],
+      edges: rows("edges") as GraphEdge[],
+      configHash: config.value,
+    };
+  } finally {
+    db.close();
+  }
+}
+function commitTimings(
+  path: string,
+  before: ReturnType<typeof snapshot>,
+  after: ReturnType<typeof snapshot>,
+) {
+  const store = new GraphStore(path);
+  const commit = (data: ReturnType<typeof snapshot>) =>
+    store.commit(data.files, data.symbols, data.edges, data.configHash);
+  try {
+    commit(before);
+    const unchanged: number[] = [];
+    const changed: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      let start = performance.now();
+      commit(before);
+      unchanged.push(performance.now() - start);
+      start = performance.now();
+      commit(after);
+      changed.push(performance.now() - start);
+      commit(before);
+    }
+    const median = (times: number[]) => {
+      times.sort((a, b) => a - b);
+      return Math.round(((times[9] ?? 0) + (times[10] ?? 0)) * 50) / 100;
+    };
+    return {
+      unchangedCommitMedianMs: median(unchanged),
+      singleFileCommitMedianMs: median(changed),
+    };
+  } finally {
+    store.close();
+  }
+}
 
 const requested = Number(process.argv[2] ?? 50000);
 if (!Number.isInteger(requested) || requested < 1000 || requested > 500000)
@@ -54,6 +113,8 @@ try {
   }
   times.sort((a, b) => a - b);
   const before = engine.status();
+  const databasePath = join(root, ".pi-graph", "index.sqlite");
+  const beforeSnapshot = snapshot(databasePath);
   await writeFile(
     join(root, "src", "generation.ts"),
     "\n\nimport { resetGeneration } from './state.js'; export function cancelGeneration() { resetGeneration(); }",
@@ -61,6 +122,11 @@ try {
   start = performance.now();
   const updated = await engine.locate(query);
   const updateMs = performance.now() - start;
+  const commits = commitTimings(
+    join(root, ".pi-graph", "commit-benchmark.sqlite"),
+    beforeSnapshot,
+    snapshot(databasePath),
+  );
   const relevant = new Set([
     "generationState",
     "resetGeneration",
@@ -69,6 +135,7 @@ try {
     "onCancelClick",
   ]);
   const precise = result.results.filter((symbol) => relevant.has(symbol.name)).length;
+  const modelText = locateText(result);
   console.log(
     JSON.stringify(
       {
@@ -77,11 +144,15 @@ try {
         files: before.files,
         symbols: before.symbols,
         coldMs: Math.round(coldMs),
+        warmMedianMs: Math.round(((times[9] ?? 0) + (times[10] ?? 0)) / 2),
         warmP95Ms: Math.round(times[18] ?? 0),
         singleFileUpdateMs: Math.round(updateMs),
+        ...commits,
         precision: result.results.length ? precise / result.results.length : 0,
         resultCount: result.results.length,
         resultCharacters: JSON.stringify(result).length,
+        modelTextCharacters: modelText.length,
+        modelTextUtf8Bytes: Buffer.byteLength(modelText, "utf8"),
         currentLinesVerified:
           updated.results.find((symbol) => symbol.name === "cancelGeneration")?.lines[0] === 3,
         results: result.results.map((symbol) => symbol.name),

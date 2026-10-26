@@ -99,9 +99,11 @@ export interface InspectResult {
   relations: GraphEdge[];
   revision: number;
 }
+export type GraphCancellation = Pick<AbortSignal, "throwIfAborted">;
 export type GraphOperation = "locate" | "inspect" | "status" | "rebuild";
 export interface WorkerRequest {
   id: number;
+  cancellation: SharedArrayBuffer;
   operation: GraphOperation;
   input?: LocateInput | InspectInput;
 }

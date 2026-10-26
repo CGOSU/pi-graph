@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import ignore, { type Ignore } from "ignore";
-import type { SourceFile } from "./types.js";
+import type { GraphCancellation, SourceFile } from "./types.js";
 
 const excluded = new Set([
   "node_modules",
@@ -44,12 +44,16 @@ interface IgnoreRule {
 }
 export async function scanSources(
   root: string,
+  cancellation?: GraphCancellation,
 ): Promise<{ files: SourceFile[]; warnings: string[] }> {
+  const paths: string[] = [];
   const files: SourceFile[] = [];
   const warnings: string[] = [];
   async function visit(directory: string, inherited: IgnoreRule[]): Promise<void> {
+    cancellation?.throwIfAborted();
     const rules = [...inherited];
     for (const name of [".gitignore", ".graphignore"]) {
+      cancellation?.throwIfAborted();
       try {
         rules.push({
           base: directory,
@@ -59,9 +63,12 @@ export async function scanSources(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
+    cancellation?.throwIfAborted();
     const entries = await readdir(directory, { withFileTypes: true });
+    cancellation?.throwIfAborted();
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      cancellation?.throwIfAborted();
       if (entry.isSymbolicLink() || excluded.has(entry.name)) continue;
       const absolutePath = join(directory, entry.name);
       const suffix = entry.isDirectory() ? "/" : "";
@@ -78,25 +85,41 @@ export async function scanSources(
       }
       if (!entry.isFile() || !sourcePattern.test(entry.name) || /\.d\.[cm]?ts$/.test(entry.name))
         continue;
+      paths.push(absolutePath);
+    }
+  }
+  await visit(root, []);
+  let next = 0;
+  async function readSources(): Promise<void> {
+    while (next < paths.length) {
+      cancellation?.throwIfAborted();
+      const index = next++;
+      const absolutePath = paths[index];
+      if (!absolutePath) continue;
       try {
         const content = await readFile(absolutePath, "utf8");
+        cancellation?.throwIfAborted();
         if (content.length > 2_000_000) {
-          warnings.push(
-            `${normalizePath(relative(root, absolutePath))}: exceeds 2 MB source limit`,
-          );
+          warnings[index] =
+            `${normalizePath(relative(root, absolutePath))}: exceeds 2 MB source limit`;
           continue;
         }
-        files.push({
+        files[index] = {
           path: normalizePath(relative(root, absolutePath)),
           absolutePath,
           content,
           hash: hashContent(content),
-        });
+        };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
   }
-  await visit(root, []);
-  return { files, warnings };
+  const reads = await Promise.allSettled(
+    Array.from({ length: Math.min(8, paths.length) }, () => readSources()),
+  );
+  const failed = reads.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+  cancellation?.throwIfAborted();
+  return { files: files.filter(Boolean), warnings: warnings.filter(Boolean) };
 }
