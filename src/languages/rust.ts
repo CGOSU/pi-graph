@@ -1,16 +1,16 @@
 import { hashContent } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
-import {
-  createRustParser,
-  namedChildren,
-  type RustNode,
-  type RustParser,
-  type RustTree,
-} from "./rust-parser.js";
 import { linkRustProject } from "./rust-project.js";
+import {
+  createParser,
+  namedChildren,
+  type SyntaxNode as RustNode,
+  type SyntaxParser as RustParser,
+  type SyntaxTree as RustTree,
+} from "./tree-sitter.js";
 
-export type { RustNode } from "./rust-parser.js";
+export type { SyntaxNode as RustNode } from "./tree-sitter.js";
 export interface RustEntry {
   node: RustNode;
   symbol: GraphSymbol;
@@ -321,7 +321,7 @@ export class RustGraph {
       }
     }
     if (!files.length) return result;
-    this.parser ??= await createRustParser();
+    this.parser ??= await createParser("rust");
     const parser = this.parser;
     const graphs = new Map<string, RustFileGraph>();
     for (const file of files) {

@@ -14,6 +14,13 @@
 
 ## 已知问题
 
+### 2026-11-04 — Tree-sitter WASM 包的 grammar wrapper 可能提高 Node 最低版本
+
+- 现象：只想依赖 Dart/Kotlin `.wasm` grammar，安装对应 npm wrapper 却违反项目现有 Node 引擎要求。
+- 根因：grammar WASM 资源包自身的 `engines` 可能要求 Node >=26，而本项目仍支持 Node >=22.19；grammar 资产和包装器的 Node 运行时要求是不同边界。
+- 修复：核对上游版本及 MIT 许可证，把固定来源的 WASM 资产和许可证 vendoring 到 `grammars/`，记录 revision/SHA-256，并在加载时校验；不要为单一 grammar 无意升级 Node 最低版本。
+- 验证：`tests/production.test.ts` 核对 tarball 包含资产/manifest/许可证，执行安装后解析，并验证缺失或损坏资产会失败；`npm test` 80/80。具体来源见 [设计决策](decisions.md)。
+
 ### 2026-11-04 — 排除规则必须同时约束扫描与监听
 
 - 现象：运行日志和构建缓存不在索引中，却反复触发全量读取；多次 debounce 到期仍能堆积串行刷新。

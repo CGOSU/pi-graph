@@ -8,6 +8,12 @@
 
 ## 已确认决策
 
+### 2026-11-04 — Dart、Go、Kotlin grammar 与局部关系
+
+- 复用 `@vscode/tree-sitter-wasm` runtime 和其 Go grammar；Dart grammar 固定上游 `UserNobody14/tree-sitter-dart` revision `a9bdfa3db2fbc9b9f12c93450d04a671f33a5102`，Kotlin grammar 固定 `tree-sitter-grammars/tree-sitter-kotlin` v1.1.0。Dart/Kotlin WASM 资产与原始 MIT license 随包发布，`grammars/sources.json` 记录 npm 获取来源和 revision，SHA-256 在 runtime 加载时核验。避免直接依赖 node engines >=26 的 Dart/Kotlin npm WASM wrapper，保持项目 Node >=22.19 契约。
+- 仅以语法树解析声明、UTF-16源码位置、包含和可唯一确认的同文件调用；遮蔽、重载歧义、未知接收者、跨文件/导入和框架运行时语义不猜测。扩展支持的文件后缀同步使旧索引配置失效。
+- 实际 grammar hashes 见 `grammars/sources.json` 及可执行完整性检查；README 记录能力与限制，完整验证见 [会话记录](session-log.md)。
+
 ### 2026-11-04 — Rust parser 使用随包提供的 WebAssembly runtime
 
 - 以 `@vscode/tree-sitter-wasm` 提供的 runtime 与 Rust grammar 替代 `tree-sitter`/`tree-sitter-rust` 原生 addon，避免在 Android/Termux 上因无 Android 预编译 addon 而进入 node-gyp 本地构建；运行时从安装包加载 WASM，不下载 grammar，不静默跳过 Rust。

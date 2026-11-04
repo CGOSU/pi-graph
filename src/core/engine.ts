@@ -1,5 +1,7 @@
 import { join, resolve } from "node:path";
 import { RustGraph } from "../languages/rust.js";
+import { SyntaxGraph } from "../languages/syntax.js";
+import { syntaxLanguage } from "../languages/tree-sitter.js";
 import { languageConfiguration, TypeScriptGraph } from "../languages/typescript.js";
 import {
   projectPath,
@@ -64,7 +66,7 @@ export class GraphEngine {
     attempt = 0,
   ): Promise<GraphStatus> {
     cancellation?.throwIfAborted();
-    const configHash = `frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}`;
+    const configHash = `syntax-v1:frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}`;
     const head = repositoryHead(this.root);
     const now = Date.now();
     if (
@@ -91,7 +93,8 @@ export class GraphEngine {
       if (
         scan.isCurrent() &&
         repositoryHead(this.root) === head &&
-        `frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}` === configHash
+        `syntax-v1:frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}` ===
+          configHash
       )
         return;
       if (attempt >= 2) throw new Error("Sources changed while indexing; retry the graph query.");
@@ -114,7 +117,7 @@ export class GraphEngine {
     ) {
       const graph = this.parser.build(
         this.root,
-        scan.files.filter((file) => !/\.rs$/i.test(file.path)),
+        scan.files.filter((file) => !/\.rs$/i.test(file.path) && !syntaxLanguage(file.path)),
       );
       // Synchronous compilers cannot be preempted; cancellation is checked between phases.
       cancellation?.throwIfAborted();
@@ -124,6 +127,13 @@ export class GraphEngine {
       graph.symbols.push(...rust.symbols);
       graph.edges.push(...rust.edges);
       graph.warnings.push(...rust.warnings);
+      cancellation?.throwIfAborted();
+      const syntax = await this.syntaxParser.build(
+        scan.files.filter((file) => syntaxLanguage(file.path)),
+      );
+      graph.symbols.push(...syntax.symbols);
+      graph.edges.push(...syntax.edges);
+      graph.warnings.push(...syntax.warnings);
       cancellation?.throwIfAborted();
       const retry = retryIfChanged();
       if (retry) return retry;
@@ -211,8 +221,10 @@ export class GraphEngine {
   }
   close(): void {
     this.rustParser.close();
+    this.syntaxParser.close();
     this.store.close();
   }
 
   private rustParser = new RustGraph();
+  private syntaxParser = new SyntaxGraph();
 }

@@ -15,6 +15,7 @@
   "files": [
     "index.ts",
     "dist/src",
+    "grammars",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

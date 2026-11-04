@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import type { GraphEdge, SourceFile } from "../core/types.js";
 import type { RustEntry, RustFileGraph, RustNode } from "./rust.js";
-import { namedChildren } from "./rust-parser.js";
+import { namedChildren } from "./tree-sitter.js";
 
 interface ParsedFile {
   source: SourceFile;

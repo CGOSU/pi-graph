@@ -8,6 +8,12 @@
 
 ## 会话
 
+### 2026-11-04 — Dart、Go、Kotlin 语法索引
+
+- 扫描与 worker 支持 `.dart`、`.go`、`.kt`、`.kts`，保留现有 Rust/TS/Vue 管线。Dart/Kotlin 固定 WASM grammar 随包发布、带 MIT 许可证及来源 SHA-256 manifest；Go 使用既有 `@vscode/tree-sitter-wasm` grammar。按语法树提供常见声明、UTF-16源码范围、包含和有限同文件调用；歧义或未知关系不猜，语法错误 warning 表示覆盖不完整。适用边界见 [README](../README.md#实现边界)。
+- 验证：`npm run prepare`、`npm run typecheck`、`npm test` 80/80。生产安装回归检查 npm tarball 包含 grammar/manifest/license、生产安装真实加载三种语法、WASM checksum 失败后可恢复；新增语法回归覆盖声明、Unicode/CRLF、局部遮蔽/重载、scope/ignore、worker、增量变更、重命名/删除和旧索引配置迁移。修改文件 `biome check` 无 error，保留 `src/languages/rust-project.ts:388` 一条既有非空断言 warning；`git diff --check` 通过。运行平台为 darwin/arm64 Node v26.11.1，未在 Android 真机验证。
+- 未实现编译器级语义、Go package/import 或 Kotlin package/Dart import 跨文件关系、Flutter widget/Android 服务 framework 语义、跨语言调用；相关能力需扩展语法/类型系统后另行验证。
+
 ### 2026-11-04 — Android 安装兼容性：Rust parser 改为 WASM
 
 - 移除 `tree-sitter` 与 `tree-sitter-rust` 原生依赖，改由随 `@vscode/tree-sitter-wasm` 包发布的 runtime 与 Rust grammar 初始化 parser。Rust 图配置 hash 升级，旧索引在下次刷新时重建；worker 关闭时释放 WASM parser 与解析树。使用测试检查生产安装依赖中不包含 `.node` addon，并覆盖 grammar 加载失败与恢复。

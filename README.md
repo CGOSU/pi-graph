@@ -47,7 +47,7 @@ Agent 工具：
 { "query": "取消生成后按钮一直转圈", "scope": "src", "limit": 6 }
 ```
 
-每个定位结果包含 symbol ID、路径、当前行号、签名、职责角色、命中原因和代码证据。关系区分 JS/TS 类型解析确认的调用/引用，以及 Vue 模板引用、Rust 调用和包含关系等语法证据。重命名或删除后旧 ID 可能失效，应重新定位。
+每个定位结果包含 symbol ID、路径、当前行号、签名、职责角色、命中原因和代码证据。关系区分 JS/TS 类型解析确认的调用/引用，以及 Vue 模板、Rust、Dart、Go、Kotlin 的语法证据。重命名或删除后旧 ID 可能失效，应重新定位。
 
 维护命令：
 
@@ -58,7 +58,7 @@ Agent 工具：
 
 ## 实现边界
 
-- JS、TS、JSX、TSX、MJS、CJS、MTS、CTS，以及 Rust（`.rs`）、Vue SFC（`.vue`）；不索引 `.d.ts`。
+- JS、TS、JSX、TSX、MJS、CJS、MTS、CTS，Rust（`.rs`）、Dart（`.dart`）、Go（`.go`）、Kotlin（`.kt`/`.kts`）和 Vue SFC（`.vue`）；不索引 `.d.ts`。
 - TypeScript Compiler API 提取函数、方法、类、类型、顶层变量、属性及可解析调用/引用；支持导入别名、重导出和根配置的路径别名。
 - React：支持 JSX/TSX 函数/类组件、匿名默认导出、内联 `memo`/`forwardRef` 包装、Hook 解构状态；复用 TypeScript 的 JSX 组件引用、Hook/函数调用解析。不执行组件，也不推断自定义 HOC 的运行时语义。
 - Vue：通过官方 SFC 解析器提取普通 `<script>` 和 `<script setup>`（JS/TS/JSX/TSX），保留原 `.vue` 文件的行号和 UTF-16 源码范围；跨 JS/TS/Vue 的 `.vue` 导入和根配置路径别名可解析。组件和模板分别建 symbol，模板中的可辨识绑定、事件和组件标签引用标注为 `syntax`。支持 setup 绑定、Options API 的 methods/computed/components，以及静态 props（字符串数组或对象）、`data`/`setup` 直接返回的唯一静态对象成员。
@@ -66,6 +66,7 @@ Agent 工具：
 - Vue 不编译样式、不执行宏，也不完整模拟 Options API 实例类型。外置 `src`、预处理模板和非 JS/TS 脚本会报告 warning；无法解析的模板表达式及不支持的局部作用域/选项形态也会报告 warning，不会将其伪装为已解析。
 - Rust 使用 Tree-sitter 提取函数、方法、struct、enum/variant、trait、模块、类型别名、字段、常量、静态变量和宏定义。包含关系及可辨识调用统一标注为 `syntax`，显式类型注解关联仅表示语法层关联，不是编译器类型解析或推断。基于已扫描文件支持 inline module、常规模块声明到唯一 `foo.rs`/`foo/mod.rs` 的映射、`lib.rs`/`main.rs` 等 crate root、嵌套模块，以及 `crate`/`self`/`super` 路径；支持模块作用域内简单、别名、分组/嵌套 use 和明确限定路径。函数/方法参数或 `let` 显式标注为唯一本地 struct/enum 类型时，可关联 inherent impl 方法及明确类型路径调用；普通引用、已支持 use 别名和 `self`/`Self` 也受限支持。歧义、缺失模块上下文或多个 crate root 共用模块文件时不猜测目标；不推断构造/返回/任意表达式类型，不支持 glob、pub use 重导出链、`extern crate`、`#[path]`、`cfg` 选择、宏生成、跨 crate/workspace、trait/泛型分派、类型别名展开、智能指针/Deref 或强制转换。无需安装 Rust 工具链。旧 Rust 解析配置版本的持久化索引会在刷新时重建，即使 Rust 源文件未变化。
 - Rust parser runtime 与 grammar 以 WebAssembly 资源随 `@vscode/tree-sitter-wasm` 包提供；不需要 Rust 工具链、平台原生 `.node` addon 或 node-gyp。默认忽略 Rust 的 `target/` 构建目录。旧原生 Rust 索引配置会在刷新时重建。
+- Dart（`.dart`）、Go（`.go`）、Kotlin（`.kt`/`.kts`）共用 `web-tree-sitter` WASM runtime：Go grammar 随 runtime 包提供，Dart/Kotlin grammar 以固定版本、校验和及许可证随项目发布。索引常见 class/struct/interface/enum、函数/方法、字段/属性、局部声明、源码范围及包含关系；同文件调用仅在目标唯一且未被参数或局部绑定遮蔽时连边，证据标记 `syntax`。Go receiver 方法按显式 receiver 类型关联；Dart/Kotlin 仅关联类内同名方法和 `this` 调用。歧义、重载、未知接收者或不可确定的作用域不猜边。Dart/Go/Kotlin 不做编译器类型解析、包/import/模块跨文件关联、跨语言调用，也不模拟 Flutter、Go 服务框架或 Android API 运行时语义。语法错误保留可解析 symbol 并附 warning。添加语法支持会使旧图配置索引在刷新时重建。
 - SQLite + FTS5 持久化；默认缓存目录为项目下 `.pi-graph/`，建议加入目标项目的 `.gitignore`。
 - 词法召回、camelCase 切分、中文双字切分及少量中英功能词映射；检索候选结合词组与标识符相关性排序，再做一跳局部图扩展、去重和预算裁剪。
 - 查询前校验快照。递归监听健康时，核对已访问目录、源文件及存在/缺失的 ignore 文件的 inode、大小、mtime/ctime 和权限，并检查 Git HEAD/ref、继承配置内容及数据库 revision；全部未变才复用内存源码，避免每次定位/检查都重读全仓内容。删除、重命名、新增目录、忽略规则或配置变化即使监听事件尚未送达，也会触发重新扫描。扫描及编译后再次核验；连续变化最多尝试三次，失败时保留上个快照并要求重试。

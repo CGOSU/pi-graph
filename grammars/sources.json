@@ -1,0 +1,20 @@
+{
+  "dart": {
+    "asset": "dart.wasm",
+    "package": "@plurnk/plurnk-mimetypes-grammar-dart",
+    "version": "2.0.0",
+    "upstream": "https://github.com/UserNobody14/tree-sitter-dart",
+    "revision": "a9bdfa3db2fbc9b9f12c93450d04a671f33a5102",
+    "sha256": "7febba2da741ecf0a216fe0a96b4f580ad18be8fe3383c266e2b3fb330b4b900",
+    "license": ["dart.LICENSE", "dart-upstream.LICENSE"]
+  },
+  "kotlin": {
+    "asset": "kotlin.wasm",
+    "package": "@binclusive/tree-sitter-kotlin-wasm",
+    "version": "0.1.0",
+    "upstream": "https://github.com/tree-sitter-grammars/tree-sitter-kotlin",
+    "upstreamPackage": "@tree-sitter-grammars/tree-sitter-kotlin@1.1.0",
+    "sha256": "7009d69453bc8735e438b2818a633efb21c88f99782769abba60dffedfab73f7",
+    "license": "kotlin.LICENSE"
+  }
+}
