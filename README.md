@@ -54,6 +54,17 @@ Agent 工具：
 - `/graph status`：索引状态、文件和 symbol 数量、版本、诊断。
 - `/graph rebuild`：强制重新解析并提交新的索引快照。
 
+状态栏随 `graph_locate`、`graph_inspect` 和上述 graph 命令更新。例如等待时显示
+`graph: locate #8 · pending 3.0s`，完成后显示
+`graph: last locate #8 · 10 results · 3.4s`；失败和取消分别显示 `failed`、`cancelled`。
+inspect 显示邻居数量，status/rebuild 显示索引 symbol 数量。`#8` 是本次 session 的 graph
+操作序号，包含失败、取消和手动命令；`10 results` 只是该次查询返回的候选数量。
+
+等待时间包含排队、刷新和查询，不代表已进入某个索引阶段或可计算的完成百分比。
+仅在有 UI 且存在未完成请求时每秒刷新文字，不额外查询索引。并发时显示尚未完成的操作及数量，
+全部结束后保留最近发起操作的结果，较早操作迟到不会覆盖它。切换/关闭 session 清除状态与计时器，
+序号重新开始；reload 后也从新序号开始，不持久化调用统计。
+
 `scope` 是 pi 当前工作目录内的相对目录或文件路径，不接受越界路径；匹配大小写敏感，并要求完整路径段边界。索引根目录为当前会话的工作目录。
 
 ## 实现边界

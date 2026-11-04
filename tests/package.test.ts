@@ -82,6 +82,55 @@ test("real pi install in an isolated profile loads callable tools without touchi
     assert.deepEqual(detail.structuredContent, inspected);
     assert.equal(inspected.symbol.id, data.results[0]?.id);
     assert(inspected.source.length > 0);
+    const statuses: (string | undefined)[] = [];
+    const uiContext = {
+      ...ctx,
+      hasUI: true,
+      ui: { setStatus: (_key: string, text: string | undefined) => statuses.push(text) },
+    } as unknown as ExtensionToolContext;
+    await locate.definition.execute(
+      "visible-locate",
+      { query: "cancelGeneration" },
+      undefined,
+      undefined,
+      uiContext,
+    );
+    assert.match(statuses[0] ?? "", /locate #3 · pending/);
+    assert.match(statuses.at(-1) ?? "", /last locate #3 · \d+ results/);
+    await assert.rejects(
+      inspect.definition.execute(
+        "missing",
+        { id: "missing-symbol" },
+        undefined,
+        undefined,
+        uiContext,
+      ),
+    );
+    assert.match(statuses.at(-1) ?? "", /last inspect #4 · failed/);
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      locate.definition.execute(
+        "cancelled",
+        { query: "cancelGeneration" },
+        controller.signal,
+        undefined,
+        uiContext,
+      ),
+      /aborted/,
+    );
+    assert.match(statuses.at(-1) ?? "", /last locate #5 · cancelled/);
+    for (const handler of extension.handlers.get("session_start") ?? [])
+      await handler({ type: "session_start" }, uiContext);
+    assert.equal(statuses.at(-1), undefined);
+    await inspect.definition.execute(
+      "visible-inspect",
+      { id: data.results[0]?.id },
+      undefined,
+      undefined,
+      uiContext,
+    );
+    assert.match(statuses.at(-1) ?? "", /last inspect #1 · \d+ neighbors/);
     const renderer = Object.create(InteractiveMode.prototype) as LabelRenderer;
     assert.deepEqual(renderer.getCompactExtensionLabels([extension]), ["pi-graph"]);
   } finally {

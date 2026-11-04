@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { GraphClient } from "../core/client.js";
 import type { GraphStatus, InspectResult, LocateResult } from "../core/types.js";
+import { GraphActivity } from "./activity.js";
 
 export function locateText(result: LocateResult): string {
   const lines = [`Revision ${result.revision} | ${result.retrieval}`];
@@ -73,18 +74,19 @@ function statusText(status: GraphStatus): string {
 }
 export function registerGraph(pi: ExtensionAPI): void {
   let client: GraphClient | undefined;
+  const activity = new GraphActivity();
   function getClient(ctx: ExtensionContext): GraphClient {
     if (!client) client = new GraphClient(ctx.cwd);
     return client;
   }
-  pi.on("session_start", async () => {
-    await client?.close();
+  async function closeSession(ctx: ExtensionContext): Promise<void> {
+    activity.reset(ctx);
+    const previous = client;
     client = undefined;
-  });
-  pi.on("session_shutdown", async () => {
-    await client?.close();
-    client = undefined;
-  });
+    await previous?.close();
+  }
+  pi.on("session_start", async (_event, ctx) => closeSession(ctx));
+  pi.on("session_shutdown", async (_event, ctx) => closeSession(ctx));
   pi.registerTool({
     name: "graph_locate",
     label: "Locate feature",
@@ -115,13 +117,19 @@ export function registerGraph(pi: ExtensionAPI): void {
       openWorldHint: false,
     },
     async execute(_toolCallId, input, signal, _onUpdate, ctx) {
-      const result = await getClient(ctx).locate(input, signal);
-      if (ctx.hasUI) ctx.ui.setStatus("pi-graph", `graph: ${result.results.length} matches`);
-      return {
-        content: [{ type: "text", text: locateText(result) }],
-        details: result,
-        structuredContent: JSON.parse(JSON.stringify(result)),
-      };
+      const finish = activity.start("locate", ctx);
+      try {
+        const result = await getClient(ctx).locate(input, signal);
+        finish({ kind: "success", summary: `${result.results.length} results` });
+        return {
+          content: [{ type: "text", text: locateText(result) }],
+          details: result,
+          structuredContent: JSON.parse(JSON.stringify(result)),
+        };
+      } catch (error) {
+        finish({ kind: signal?.aborted ? "cancelled" : "failed" });
+        throw error;
+      }
     },
   });
   pi.registerTool({
@@ -149,12 +157,19 @@ export function registerGraph(pi: ExtensionAPI): void {
       openWorldHint: false,
     },
     async execute(_toolCallId, input, signal, _onUpdate, ctx) {
-      const result = await getClient(ctx).inspect(input, signal);
-      return {
-        content: [{ type: "text", text: inspectText(result) }],
-        details: result,
-        structuredContent: JSON.parse(JSON.stringify(result)),
-      };
+      const finish = activity.start("inspect", ctx);
+      try {
+        const result = await getClient(ctx).inspect(input, signal);
+        finish({ kind: "success", summary: `${result.neighbors.length} neighbors` });
+        return {
+          content: [{ type: "text", text: inspectText(result) }],
+          details: result,
+          structuredContent: JSON.parse(JSON.stringify(result)),
+        };
+      } catch (error) {
+        finish({ kind: signal?.aborted ? "cancelled" : "failed" });
+        throw error;
+      }
     },
   });
   pi.registerCommand("graph", {
@@ -165,18 +180,20 @@ export function registerGraph(pi: ExtensionAPI): void {
         if (ctx.hasUI) ctx.ui.notify("Usage: /graph status | /graph rebuild", "warning");
         return;
       }
+      const finish = activity.start(command, ctx);
       try {
         const graph = getClient(ctx);
         const status = command === "rebuild" ? await graph.rebuild() : await graph.status();
+        finish({ kind: "success", summary: `${status.symbols} symbols` });
         if (ctx.hasUI) {
           ctx.ui.notify(statusText(status), "info");
-          ctx.ui.setStatus("pi-graph", `graph: ${status.symbols} symbols`);
         } else
           pi.sendMessage(
             { customType: "pi-graph-status", content: statusText(status), display: true },
             { triggerTurn: false },
           );
       } catch (error) {
+        finish({ kind: "failed" });
         if (ctx.hasUI)
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         else throw error;

@@ -13,6 +13,7 @@
 
 ## 已知状态
 
+- graph状态栏已支持请求等待计时、操作序号、最近结果、失败/取消及会话清理；含义和并发边界见[README](../README.md)，实际验证见[会话记录](session-log.md)。
 - Dart `.dart`、Go `.go`、Kotlin `.kt`/`.kts` 现由 Tree-sitter WASM parser 索引；支持常见声明、源码范围、包含关系与有歧义保护的同文件语法调用，不提供编译器级类型、跨文件包关系或 Flutter/Android 框架语义分析。Dart/Kotlin grammar 随包发布，来源、许可和升级校验见 [决策](decisions.md)；旧图配置会在刷新时重建。
 - 监听过滤、刷新合并、带新鲜度核验的快照复用与 revision 诊断恢复已完成；公开行为和 30 秒哈希兜底边界见 [README](../README.md#实现边界)。
 - Vue SFC 支持静态 Options API props/data/setup 返回成员绑定及 `v-for`/`v-slot` 局部作用域解析；不支持形态以 warning 标示并保守跳过，完整边界见 [README](../README.md#实现边界)。React 增补包装组件、匿名默认导出与 Hook 解构状态。
@@ -20,10 +21,11 @@
 
 ## 待处理
 
-- 将本次改动同步到正在使用的 Pi 安装副本，并重启旧扩展会话后，运行中的 Pi 才会使用新检索实现；本次未触碰真实索引或安装副本。实现与验证见[会话记录](session-log.md)。
+- 动态状态栏通过安装包的dist入口加载；磁盘更新不会改变长驻实例，需在当前工作安全结束后reload或重启Pi。审计时安装副本已包含此前检索改动，不能继续将历史“未部署”记录当作当前状态。
 
 ## 最近一次更新
 
+- 2026-11-04：实现graph动态状态展示与会话边界清理；定向测试9/9通过，构建、类型和目标文件格式检查通过。验证边界见[会话记录](session-log.md)。
 - 2026-11-04：增加独立精确名称索引、Unicode 组合字符保留和严格 scope 匹配，保留 80 个 FTS 与 40 个名称候选预算；合成 GraphStore 查询显示检索延迟下降，但首次写入及索引体积增加。实现选择、验证和性能边界见[设计决策](decisions.md)与[会话记录](session-log.md)。
 - 2026-11-04：修复混合查询中精确标识符挤出实现候选、局部变量占满结果的问题；FlClash 持久化索引 revision 40 的同快照复放恢复两个 `Compile` 及 `Store.load`。改动尚未同步到正在使用的 Pi 安装副本，细节见 [设计决策](decisions.md)、[踩坑记录](pitfalls.md) 与 [会话记录](session-log.md)。
 - 2026-11-04：修复 Kotlin grammar 将合法的 `open` 属性名误判为修饰符的问题，并将图索引配置升至 `syntax-v2` 以重建旧解析结果；FlClash 目标测试提取 84 个符号、79 条关系且无 warning。修复尚未部署到 Pi 安装副本；见 [设计决策](decisions.md) 与 [会话记录](session-log.md)。

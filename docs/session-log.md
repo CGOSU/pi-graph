@@ -8,6 +8,13 @@
 
 ## 会话
 
+### 2026-11-04 — graph动态状态栏
+
+- 完成：以独立展示模块统一工具与命令的开始/完成/失败/取消提示、session操作序号及等待计时；会话切换先失效旧展示和旧client，防止迟到回调污染新状态。行为与边界见[README](../README.md)及[设计决策](decisions.md)。保留用户既有`.pi/role-models.json`及未跟踪运行产物。
+- 验证：隔离临时检出中`npm run build`、`node --test dist/tests/activity.test.js dist/tests/package.test.js`（9/9）、`node_modules/.bin/tsc --noEmit`、四个改动TypeScript文件的Biome检查及`git diff --check`通过。包含真实Pi隔离安装/加载、成功结果不变、失败和取消仍抛错、并发完成顺序、跨session迟到结果、等待计时清理与headless无UI访问。独立静态审阅未发现阻塞缺陷。
+- 过程：首次测试7通过、2失败，原因是临时检出目录名不为`pi-graph`，触发既有包标签断言；移至同名目录后9项全部通过。首次格式检查发现一处换行，格式化后通过；这些不记作初次验证通过。
+- 边界：未跑全量测试，未做真实TUI视觉验收或模型请求；交付包含本机安装副本同步，但不reload活动会话或重建真实索引。源码与构建产物就绪不代表运行中实例已加载。
+
 ### 2026-11-04 — 独立精确名称通道修复与性能验证
 
 - 完成独立精确名称通道与旧库迁移：原样或大小写折叠的短名/限定名分级召回，保留 Unicode 组合字符，并在候选截断前严格匹配 scope；匹配等级、SQLite schema 和事务机制见[设计决策](decisions.md)。涉及实现 `src/core/names.ts`、`src/core/retrieval.ts` 与 `src/core/store.ts`。
