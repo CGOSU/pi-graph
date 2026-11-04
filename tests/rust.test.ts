@@ -182,11 +182,7 @@ fn generic() { finish::<u8>(); }
     assert.deepEqual(await calls("entry"), ["Task::new", "inner::local"]);
     assert.deepEqual(await calls("Task::stop"), ["Task::finish", "Task::new"]);
     assert.deepEqual(await calls("inner::run"), ["finish", "inner::local"]);
-    for (const name of [
-      "inner::isolated",
-      "shadow_parameter",
-      "shadow_local",
-    ])
+    for (const name of ["inner::isolated", "shadow_parameter", "shadow_local"])
       assert.deepEqual(await calls(name), [], name);
     assert.deepEqual(await calls("arbitrary_receiver"), ["Task::finish"]);
     assert.deepEqual(await calls("inferred_receiver"), ["Task::new"]);
@@ -271,7 +267,11 @@ impl State { pub fn reset(&self) {} }
     assert.deepEqual(await rustCalls(f, "enum_parameter"), ["types::State::reset"]);
     assert.deepEqual(await rustCalls(f, "shadowed"), []);
     assert.deepEqual(await rustCalls(f, "unannotated_shadow"), []);
-    assert.deepEqual(await rustCalls(f, "closure_shadow"), [], "closure parameter shadows outer type");
+    assert.deepEqual(
+      await rustCalls(f, "closure_shadow"),
+      [],
+      "closure parameter shadows outer type",
+    );
     assert.deepEqual(await rustCalls(f, "match_shadow"), [], "match binding shadows outer type");
     assert.deepEqual(await rustCalls(f, "for_shadow"), [], "loop binding shadows outer type");
     assert.deepEqual(await rustCalls(f, "inferred"), ["types::Widget::new"]);

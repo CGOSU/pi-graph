@@ -1,10 +1,6 @@
 import { posix } from "node:path";
 import type { GraphEdge, SourceFile } from "../core/types.js";
-import type {
-  RustEntry,
-  RustFileGraph,
-  RustNode,
-} from "./rust.js";
+import type { RustEntry, RustFileGraph, RustNode } from "./rust.js";
 
 interface ParsedFile {
   source: SourceFile;
@@ -252,8 +248,7 @@ function patternNames(pattern: RustNode | null): string[] {
       names.push(node.text);
       return;
     }
-    if (node.type.endsWith("_pattern"))
-      for (const child of node.namedChildren) visit(child);
+    if (node.type.endsWith("_pattern")) for (const child of node.namedChildren) visit(child);
   }
   visit(pattern);
   return [...new Set(names)];
@@ -315,8 +310,7 @@ function bindingsFor(functionNode: RustNode): TypedBinding[] {
     }
     if (node.type === "let_declaration") {
       const scope = nearestBlock(node, functionNode);
-      if (scope)
-        addPattern(field(node, "pattern"), field(node, "type"), scope, node.endIndex);
+      if (scope) addPattern(field(node, "pattern"), field(node, "type"), scope, node.endIndex);
     } else if (node.type === "for_expression") {
       const scope = field(node, "body");
       if (scope) addPattern(field(node, "pattern"), null, scope, node.startIndex);
@@ -420,7 +414,11 @@ function typeForImplementation(
     genericTypes,
   );
 }
-function methodsForType(context: ProjectContext, type: ContextEntry, methodName: string): ContextEntry[] {
+function methodsForType(
+  context: ProjectContext,
+  type: ContextEntry,
+  methodName: string,
+): ContextEntry[] {
   const methods = context.inherentMethods.get(type.entry.symbol.id) ?? [];
   return methods.filter((method) => method.entry.symbol.name === methodName);
 }
@@ -512,9 +510,7 @@ function resolveCall(
 function shadowsCall(call: RustNode, functionNode: RustNode, name: string): boolean {
   return bindingsFor(functionNode).some(
     (binding) =>
-      binding.name === name &&
-      binding.start < call.startIndex &&
-      isAncestor(binding.scope, call),
+      binding.name === name && binding.start < call.startIndex && isAncestor(binding.scope, call),
   );
 }
 function addEntry(context: ProjectContext, fileModulePath: string[], entry: RustEntry): void {
@@ -627,7 +623,11 @@ export function linkRustProject(
     }
   }
   return {
-    edges: [...new Map(edges.map((edge) => [`${edge.source}|${edge.target}|${edge.kind}`, edge])).values()],
+    edges: [
+      ...new Map(
+        edges.map((edge) => [`${edge.source}|${edge.target}|${edge.kind}`, edge]),
+      ).values(),
+    ],
     qualifiedNames,
   };
 }

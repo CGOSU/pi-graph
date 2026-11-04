@@ -112,7 +112,9 @@ export function languageConfiguration(root: string): LanguageConfiguration {
     else {
       const parsed = ts.parseJsonConfigFileContent(
         config.config,
-        { ...ts.sys, readFile: read },
+        // The graph supplies its own source list; config checks need options and inherited
+        // file contents, not another recursive directory enumeration on every query.
+        { ...ts.sys, readFile: read, readDirectory: () => [] },
         resolve(path, ".."),
       );
       options = { ...options, ...parsed.options, allowJs: true, noEmit: true };

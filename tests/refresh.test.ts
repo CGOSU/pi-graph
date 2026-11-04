@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { chmod, rename, rm, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { scanSources } from "../src/core/files.js";
+import { RustGraph } from "../src/languages/rust.js";
 import { fixture } from "./helpers.js";
 
 test("bounded scans keep source contents coherent and reapply ignore changes", async () => {
@@ -95,6 +97,55 @@ test("queued refreshes and queries publish complete matching source snapshots", 
     assert.equal(inspected.revision, background.revision);
     assert(inspected.source.includes("{ 2 }"));
     assert.equal(rebuilt.revision, background.revision + 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("edits during compilation are reconciled before publishing source positions", async (t) => {
+  const f = await fixture({ "lib.rs": "pub fn value() -> i32 { 1 }" });
+  try {
+    const build = RustGraph.prototype.build;
+    let changed = false;
+    t.mock.method(
+      RustGraph.prototype,
+      "build",
+      function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
+        const result = build.apply(this, args);
+        if (!changed) {
+          changed = true;
+          writeFileSync(join(f.root, "lib.rs"), "pub fn value() -> i32 { 200 }");
+        }
+        return result;
+      },
+    );
+    const located = await f.engine.locate({ query: "value" });
+    assert.equal(located.revision, 1, "the outdated compilation must never be committed");
+    const detail = await f.engine.inspect({ id: located.results[0]?.id ?? "" });
+    assert(detail.source.includes("{ 200 }"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("continuous edits fail bounded reconciliation without replacing the last snapshot", async (t) => {
+  const f = await fixture({ "lib.rs": "pub fn value() -> i32 { 1 }" });
+  try {
+    const before = await f.engine.refresh();
+    const build = RustGraph.prototype.build;
+    let changes = 2;
+    t.mock.method(
+      RustGraph.prototype,
+      "build",
+      function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
+        const result = build.apply(this, args);
+        writeFileSync(join(f.root, "lib.rs"), `pub fn value() -> i32 { ${changes++} }`);
+        return result;
+      },
+    );
+    await assert.rejects(f.engine.refresh(true), /Sources changed while indexing/);
+    assert.equal(changes, 5);
+    assert.deepEqual(f.engine.status(), before);
   } finally {
     await f.cleanup();
   }

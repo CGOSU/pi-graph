@@ -1,7 +1,13 @@
 import { join, resolve } from "node:path";
 import { RustGraph } from "../languages/rust.js";
 import { languageConfiguration, TypeScriptGraph } from "../languages/typescript.js";
-import { projectPath, scanSources } from "./files.js";
+import {
+  projectPath,
+  relevantSourceChange,
+  repositoryHead,
+  type SourceScan,
+  scanSources,
+} from "./files.js";
 import { locate, located } from "./retrieval.js";
 import { GraphStore } from "./store.js";
 import type {
@@ -23,9 +29,26 @@ export class GraphEngine {
   private lastChanged = 0;
   private lastDeleted = 0;
   private refreshTail: Promise<void> = Promise.resolve();
+  private watching = false;
+  private changes = 0;
+  private scannedChanges = -1;
+  private lastScan = 0;
+  private publishedRevision = 0;
+  private head: string | undefined;
+  private scan?: SourceScan;
   constructor(root: string, databasePath?: string) {
     this.root = resolve(root);
     this.store = new GraphStore(databasePath ?? join(this.root, ".pi-graph", "index.sqlite"));
+    this.warnings = this.store.warnings() ?? [];
+  }
+  setWatching(active: boolean): void {
+    this.watching = active;
+    this.changes++;
+  }
+  sourceChanged(path: string): boolean {
+    if (!relevantSourceChange(this.root, path, this.scan)) return false;
+    this.changes++;
+    return true;
   }
   refresh(force = false, cancellation?: GraphCancellation): Promise<GraphStatus> {
     const pending = this.refreshTail.then(() => this.refreshCurrent(force, cancellation));
@@ -38,20 +61,56 @@ export class GraphEngine {
   private async refreshCurrent(
     force: boolean,
     cancellation?: GraphCancellation,
+    attempt = 0,
   ): Promise<GraphStatus> {
+    cancellation?.throwIfAborted();
+    const configHash = `frameworks-v2:rust-v2:${languageConfiguration(this.root).hash}`;
+    const head = repositoryHead(this.root);
+    const now = Date.now();
+    if (
+      !force &&
+      this.watching &&
+      this.scan &&
+      this.scannedChanges === this.changes &&
+      now >= this.lastScan &&
+      now - this.lastScan < 30_000 &&
+      this.publishedRevision === Number(this.store.metadata("revision")) &&
+      this.store.metadata("configHash") === configHash &&
+      head !== undefined &&
+      head === this.head &&
+      this.scan.isCurrent()
+    ) {
+      this.lastChanged = 0;
+      this.lastDeleted = 0;
+      return this.status();
+    }
+    const changes = this.changes;
     const scan = await scanSources(this.root, cancellation);
     cancellation?.throwIfAborted();
+    const retryIfChanged = (): Promise<GraphStatus> | undefined => {
+      if (
+        scan.isCurrent() &&
+        repositoryHead(this.root) === head &&
+        `frameworks-v2:rust-v2:${languageConfiguration(this.root).hash}` === configHash
+      )
+        return;
+      if (attempt >= 2) throw new Error("Sources changed while indexing; retry the graph query.");
+      return this.refreshCurrent(force, cancellation, attempt + 1);
+    };
+    const retry = retryIfChanged();
+    if (retry) return retry;
     const previous = new Map(this.store.files().map((file) => [file.path, file.hash]));
     const changed = scan.files.filter((file) => previous.get(file.path) !== file.hash);
     const current = new Set(scan.files.map((file) => file.path));
     const deleted = [...previous.keys()].filter((path) => !current.has(path));
-    const configHash = `frameworks-v2:rust-v2:${languageConfiguration(this.root).hash}`;
     cancellation?.throwIfAborted();
     if (
       force ||
       changed.length ||
       deleted.length ||
-      this.store.metadata("configHash") !== configHash
+      this.store.metadata("configHash") !== configHash ||
+      this.store.warnings() === undefined ||
+      JSON.stringify(scan.warnings) !== this.store.metadata("scanWarnings")
     ) {
       const graph = this.parser.build(
         this.root,
@@ -64,13 +123,30 @@ export class GraphEngine {
       graph.edges.push(...rust.edges);
       graph.warnings.push(...rust.warnings);
       cancellation?.throwIfAborted();
+      const retry = retryIfChanged();
+      if (retry) return retry;
       // Commit and in-memory publication must finish together once the transaction starts.
-      this.store.commit(scan.files, graph.symbols, graph.edges, configHash);
-      this.warnings = [...scan.warnings, ...graph.warnings].slice(0, 12);
+      const warnings = [...scan.warnings, ...graph.warnings].slice(0, 12);
+      this.store.commit(
+        scan.files,
+        graph.symbols,
+        graph.edges,
+        configHash,
+        warnings,
+        scan.warnings,
+      );
+      this.warnings = warnings;
+    } else {
+      this.warnings = this.store.warnings() ?? [];
     }
     this.lastChanged = changed.length;
     this.lastDeleted = deleted.length;
     this.sources = new Map(scan.files.map((file) => [file.path, file]));
+    this.scan = scan;
+    this.scannedChanges = changes;
+    this.lastScan = now;
+    this.head = head;
+    this.publishedRevision = Number(this.store.metadata("revision"));
     return this.status();
   }
   status(): GraphStatus {

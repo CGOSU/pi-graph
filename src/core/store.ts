@@ -45,6 +45,18 @@ export class GraphStore {
         | undefined
     )?.value;
   }
+  warnings(): string[] | undefined {
+    const value = this.metadata("warnings");
+    if (value === undefined) return undefined;
+    try {
+      const warnings: unknown = JSON.parse(value);
+      return Array.isArray(warnings) && warnings.every((item) => typeof item === "string")
+        ? warnings
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   symbol(id: string): GraphSymbol | undefined {
     const row = this.prepare("SELECT data FROM symbols WHERE id=?").get(id) as
       | SymbolRow
@@ -63,6 +75,8 @@ export class GraphStore {
     symbols: GraphSymbol[],
     edges: GraphEdge[],
     configHash: string,
+    warnings: string[] = [],
+    scanWarnings: string[] = [],
   ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -75,6 +89,8 @@ export class GraphStore {
       metadata.run("revision", String(Number(this.metadata("revision") ?? "0") + 1));
       metadata.run("indexedAt", new Date().toISOString());
       metadata.run("configHash", configHash);
+      metadata.run("warnings", JSON.stringify(warnings));
+      metadata.run("scanWarnings", JSON.stringify(scanWarnings));
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

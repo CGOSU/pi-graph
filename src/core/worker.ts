@@ -9,23 +9,33 @@ const engine = new GraphEngine((workerData as { root: string }).root);
 let queue = Promise.resolve();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let watcher: FSWatcher | undefined;
+let refreshQueued = false;
+function scheduleRefresh(): void {
+  if (refreshQueued) return;
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(() => {
+    timer = undefined;
+    refreshQueued = true;
+    queue = queue
+      .then(async () => {
+        // Events arriving during a refresh may schedule one following reconciliation.
+        refreshQueued = false;
+        await engine.refresh();
+      })
+      .catch(() => {});
+  }, 300);
+}
 try {
   watcher = watch(engine.root, { recursive: true }, (_event, filename) => {
     const path = filename?.toString().replaceAll("\\", "/") ?? "";
-    if (/(?:^|\/)(?:node_modules|\.pi-graph|\.empryo|dist|build|coverage)(?:\/|$)/.test(path))
-      return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      queue = queue
-        .then(async () => {
-          await engine.refresh();
-        })
-        .catch(() => {});
-    }, 300);
+    if (engine.sourceChanged(path)) scheduleRefresh();
   });
+  engine.setWatching(true);
   watcher.on("error", () => {
+    engine.setWatching(false);
     watcher?.close();
   });
+  watcher.on("close", () => engine.setWatching(false));
 } catch {
   /* Queries reconcile hashes when recursive watching is unavailable. */
 }
