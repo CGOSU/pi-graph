@@ -13,6 +13,7 @@
 - 完成：以独立展示模块统一工具与命令的开始/完成/失败/取消提示、session操作序号及等待计时；会话切换先失效旧展示和旧client，防止迟到回调污染新状态。行为与边界见[README](../README.md)及[设计决策](decisions.md)。保留用户既有`.pi/role-models.json`及未跟踪运行产物。
 - 验证：隔离临时检出中`npm run build`、`node --test dist/tests/activity.test.js dist/tests/package.test.js`（9/9）、`node_modules/.bin/tsc --noEmit`、四个改动TypeScript文件的Biome检查及`git diff --check`通过。包含真实Pi隔离安装/加载、成功结果不变、失败和取消仍抛错、并发完成顺序、跨session迟到结果、等待计时清理与headless无UI访问。独立静态审阅未发现阻塞缺陷。
 - 过程：首次测试7通过、2失败，原因是临时检出目录名不为`pi-graph`，触发既有包标签断言；移至同名目录后9项全部通过。首次格式检查发现一处换行，格式化后通过；这些不记作初次验证通过。
+- 安装验证：本机安装副本已从本地开发仓库快进同步；其生产依赖不含`@types/node`，因此常规`npm run build`失败，改用既有`node scripts/prepare.mjs`成功生成23个运行模块。展示模块源码与开发构建产物逐字节一致。原生Node直导入口缺少由Pi宿主提供的typebox peer，不作为加载结论；最终用文件式探针`/tmp/pi-graph-dynamic-status/pi-graph/verify-installed.mjs`在隔离Pi profile中实际加载安装副本，locate/inspect及其pending/完成序号检查通过，随后关闭worker并清理临时项目。未触碰FlClash索引。
 - 边界：未跑全量测试，未做真实TUI视觉验收或模型请求；交付包含本机安装副本同步，但不reload活动会话或重建真实索引。源码与构建产物就绪不代表运行中实例已加载。
 
 ### 2026-11-04 — 独立精确名称通道修复与性能验证
