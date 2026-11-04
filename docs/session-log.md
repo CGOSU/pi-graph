@@ -8,6 +8,13 @@
 
 ## 会话
 
+### 2026-11-04 — 修复混合检索的名称候选丢失与局部变量挤占
+
+- 完成 `src/core/store.ts` 与 `src/core/retrieval.ts` 修复：名称候选使用有界召回；精确命中排序不再抬高置信度门槛；多概念行为查询用真实 `contains` 关系归并局部变量线索。新增 `tests/retrieval.test.ts`，并扩展 Go 混合查询及精确变量回归。根因和长期检索规则分别记于 [踩坑记录](pitfalls.md) 与 [设计决策](decisions.md)。
+- 在 FlClash 现有图索引只读快照 revision 40 上对比修复前后：DNS 混合查询从看不到实现变为找到 `core/singbox/profile/compile.go` 和 `core/singbox/routing/compile.go` 的 `Compile`；资源查询从字段/局部变量结果变为包含 `core/singbox/resources/cache.go` 的 `Store.load`，其局部变量不再占据结果名额。复放前后为同一 revision。
+- 验证：`npm run build` 后运行 `node --test dist/tests/retrieval.test.js dist/tests/graph.test.js dist/tests/store.test.js dist/tests/syntax-languages.test.js dist/tests/rust.test.js dist/tests/frameworks.test.js`，45/45 通过；`npx biome check src/core/store.ts src/core/retrieval.ts tests/graph.test.ts tests/retrieval.test.ts` 通过；`git diff --check` 通过。
+- 遗留：未运行全量 `npm test`。当前开发仓库改动尚未同步到 Pi 安装副本，因此已运行的 Pi 扩展仍不会得到此修复；未执行安装、部署或 push。
+
 ### 2026-11-04 — 修复 Kotlin `open` 属性名导致的语法树级联错误
 
 - FlClash 的 `SingBoxSessionTest.kt` 使用合法 Kotlin 属性 `var open = true`。固定 grammar v1.1.0 将 `open` 当作修饰符后会产生 ERROR，级联把 `Resource` 识别为 enum 并漏掉后续方法/关系，原文件仅得到 11 个符号、8 条关系并带 parse warning。根因是上游 grammar 没把 `open` 纳入可按语境解释的 reserved identifier。

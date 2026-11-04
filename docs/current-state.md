@@ -23,6 +23,7 @@
 
 ## 最近一次更新
 
+- 2026-11-04：修复混合查询中精确标识符挤出实现候选、局部变量占满结果的问题；FlClash 持久化索引 revision 40 的同快照复放恢复两个 `Compile` 及 `Store.load`。改动尚未同步到正在使用的 Pi 安装副本，细节见 [设计决策](decisions.md)、[踩坑记录](pitfalls.md) 与 [会话记录](session-log.md)。
 - 2026-11-04：修复 Kotlin grammar 将合法的 `open` 属性名误判为修饰符的问题，并将图索引配置升至 `syntax-v2` 以重建旧解析结果；FlClash 目标测试提取 84 个符号、79 条关系且无 warning。修复尚未部署到 Pi 安装副本；见 [设计决策](decisions.md) 与 [会话记录](session-log.md)。
 - 2026-11-04：优化 SQLite FTS5 文档批量更新，避免每个变更符号各自扫描全文索引；FlClash 93,619 符号快照在临时库通过数据一致性与检索验证。实现细节和边界见 [设计决策](decisions.md) 与 [会话记录](session-log.md)。
 - 2026-11-04：新增 Dart、Go、Kotlin 符号导航与保守的同文件调用关系；grammar 资产随包发布并固定校验和。全量测试通过，见 [设计决策](decisions.md) 和 [会话记录](session-log.md)。

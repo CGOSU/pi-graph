@@ -166,7 +166,7 @@ export class GraphStore {
     }
     for (const edge of old.values()) remove.run(edge.source, edge.target, edge.kind);
   }
-  search(terms: string[], scope?: string): GraphSymbol[] {
+  search(terms: string[], scope?: string, identifiers: string[] = []): GraphSymbol[] {
     if (!terms.length) return [];
     const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
     const escapedScope = scope?.replace(/[\\%_]/g, "\\$&");
@@ -178,7 +178,42 @@ export class GraphStore {
       scope ?? null,
       escapedScope ? `${escapedScope}/%` : null,
     ) as unknown as SymbolRow[];
-    return rows.map((row) => JSON.parse(row.data) as GraphSymbol);
+    // Keep a separate, bounded name lane so body matches cannot exhaust recall first.
+    const identifierNames = JSON.stringify(identifiers.slice(0, 32));
+    const named = this.prepare(
+      `WITH names AS (SELECT value FROM json_each(?))
+       SELECT s.data FROM documents d JOIN symbols s ON s.id=d.id
+       WHERE documents MATCH ? AND (? IS NULL OR s.path=? OR s.path LIKE ? ESCAPE '\\')
+         AND (lower(json_extract(s.data,'$.name')) IN (SELECT value FROM names)
+           OR lower(json_extract(s.data,'$.qualifiedName')) IN (SELECT value FROM names))
+       ORDER BY CASE
+         WHEN lower(json_extract(s.data,'$.name')) IN (SELECT value FROM json_each(?))
+           OR lower(json_extract(s.data,'$.qualifiedName')) IN (SELECT value FROM json_each(?))
+         THEN 0 ELSE 1 END,
+         CASE json_extract(s.data,'$.kind') WHEN 'function' THEN 0 WHEN 'method' THEN 0 ELSE 1 END,
+         bm25(documents),s.id LIMIT 40`,
+    ).all(
+      JSON.stringify([...new Set([...terms, ...identifiers])].slice(0, 64)),
+      match,
+      scope ?? null,
+      scope ?? null,
+      escapedScope ? `${escapedScope}/%` : null,
+      identifierNames,
+      identifierNames,
+    ) as unknown as SymbolRow[];
+    const symbols = new Map<string, GraphSymbol>();
+    for (const row of [...rows, ...named]) {
+      const symbol = JSON.parse(row.data) as GraphSymbol;
+      symbols.set(symbol.id, symbol);
+    }
+    return [...symbols.values()];
+  }
+  containers(ids: string[]): GraphEdge[] {
+    if (!ids.length) return [];
+    const rows = this.prepare(
+      "SELECT e.data FROM edges e JOIN symbols s ON s.id=e.target WHERE e.kind='contains' AND e.target IN (SELECT value FROM json_each(?)) AND e.source=json_extract(s.data,'$.parentId')",
+    ).all(JSON.stringify(ids)) as unknown as { data: string }[];
+    return rows.map((row) => JSON.parse(row.data) as GraphEdge);
   }
   neighbors(id: string, limit = 24): GraphEdge[] {
     const rows = this.prepare(

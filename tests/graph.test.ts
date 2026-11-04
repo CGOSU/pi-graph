@@ -38,6 +38,45 @@ test("exact identifiers outrank containing classes and similar names", async () 
     await f.cleanup();
   }
 });
+test("mixed Go queries keep DNS compilation alongside an exact type hint", async () => {
+  const f = await fixture({
+    "mobile/runtime.go":
+      "package mobile\ntype PreparedPolicy struct { factory string }\ntype DNSConfig interface {}\n",
+    "dnspolicy/compile.go":
+      "package dnspolicy\n// Compile DNS configuration nameserver policy hosts fakeip.\nfunc Compile(source string) string { return source }\n",
+  });
+  try {
+    const query =
+      "Compile DNS source configuration nameserver-policy hosts fakeip filter route DNS complete candidate PreparedPolicy factory";
+    for (const text of [query, `${query} DNSConfig`]) {
+      const result = await f.engine.locate({ query: text, limit: 8 });
+      assert(result.results.some((symbol) => symbol.name === "PreparedPolicy"));
+      assert(result.results.some((symbol) => symbol.name === "Compile"));
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+test("mixed Go queries keep snapshot loading alongside exact field hints", async () => {
+  const f = await fixture({
+    "resources/types.go":
+      "package resources\ntype Artifact struct { BinaryFile string; SourceFile string }\n",
+    "resources/store.go":
+      "package resources\ntype Store struct {}\nfunc (s *Store) LoadSnapshot() Artifact { return Artifact{} }\n",
+  });
+  try {
+    const result = await f.engine.locate({
+      query: "resource candidate snapshot store load validate BinaryFile SourceFile",
+      scope: "resources",
+      limit: 5,
+    });
+    assert(result.results.some((symbol) => symbol.name === "Artifact.BinaryFile"));
+    assert(result.results.some((symbol) => symbol.name === "Artifact.SourceFile"));
+    assert(result.results.some((symbol) => symbol.name === "Store.LoadSnapshot"));
+  } finally {
+    await f.cleanup();
+  }
+});
 test("multi-concept queries favor behavior but literal fields remain searchable", async () => {
   const f = await fixture({
     "options.ts":
@@ -94,6 +133,8 @@ test("graph-only neighbors do not displace multi-word matches", async () => {
     assert(
       inspect.relations.some((edge) => edge.kind === "calls" && edge.evidence === "type-resolved"),
     );
+    const exact = await f.engine.locate({ query: "cancelGeneration", limit: 3 });
+    assert(!exact.results.some((symbol) => symbol.name === "auditTelemetry"));
   } finally {
     await f.cleanup();
   }
