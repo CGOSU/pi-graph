@@ -1,0 +1,10 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -55,2 +55,3 @@
+     [$.class_modifier, $._reserved_identifier],
++    [$.inheritance_modifier, $._reserved_identifier],
+     [$.platform_modifier, $._reserved_identifier],
+@@ -1059,2 +1059,3 @@
+         'operator',
++        'open',
+         'value',

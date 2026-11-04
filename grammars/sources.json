@@ -10,11 +10,22 @@
   },
   "kotlin": {
     "asset": "kotlin.wasm",
-    "package": "@binclusive/tree-sitter-kotlin-wasm",
-    "version": "0.1.0",
+    "package": "@tree-sitter-grammars/tree-sitter-kotlin",
+    "version": "1.1.0",
     "upstream": "https://github.com/tree-sitter-grammars/tree-sitter-kotlin",
-    "upstreamPackage": "@tree-sitter-grammars/tree-sitter-kotlin@1.1.0",
-    "sha256": "7009d69453bc8735e438b2818a633efb21c88f99782769abba60dffedfab73f7",
+    "source": "https://codeload.github.com/tree-sitter-grammars/tree-sitter-kotlin/tar.gz/refs/tags/v1.1.0",
+    "sourceSha256": "3c36bd5627fff38e4323ebead1f7e86e6d1727f0353618d1c976fea88260ba90",
+    "patches": ["kotlin-open-identifier.patch"],
+    "build": {
+      "treeSitterCli": "0.25.10",
+      "emscripten": "4.0.10",
+      "commands": [
+        "patch -p1 < /path/to/pi-graph/grammars/kotlin-open-identifier.patch",
+        "tree-sitter generate --abi 14",
+        "tree-sitter build --wasm"
+      ]
+    },
+    "sha256": "e773858a8bb9af8c1998c1de560a1f6663486f1a32ae055dcb474bc73a17e7b5",
     "license": "kotlin.LICENSE"
   }
 }

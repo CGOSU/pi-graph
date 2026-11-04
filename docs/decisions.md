@@ -8,6 +8,12 @@
 
 ## 已确认决策
 
+### 2026-11-04 — 修补 Kotlin `open` 软关键字解析并迁移索引
+
+- Kotlin grammar v1.1.0 原本将 `open` 仅作为继承修饰符，缺少其在标识符上下文的保留标识与歧义冲突处理；合法属性 `var open = true` 会造成 ERROR 节点、解析告警及后续声明丢失。对固定上游源码保留最小 patch：将 `open` 加入 reserved identifier 并与 inheritance modifier 声明冲突处理；修饰符场景仍须正常解析。
+- 由固定的 upstream v1.1.0 源码 tar、仓库 patch、Tree-sitter CLI 0.25.10 和 Emscripten 4.0.10 构建 WASM；源档案、patch、构建命令及最终资源 SHA-256 写入 `grammars/sources.json`。原先使用的 Kotlin WASM wrapper 资源已被此固定源码构建取代。
+- 图索引配置从 `syntax-v1` 提升为 `syntax-v2`，确保未变化的源码文件也重建符号和告警，修复旧快照中 `Resource` 被错误识别为 enum 的记录。不改变 Kotlin 语法分析的“非编译器语义”边界或公共 API。验证与未部署范围见 [会话记录](session-log.md)。
+
 ### 2026-11-04 — 批量更新 SQLite FTS5 文档
 
 - `documents.id` 在 FTS5 中是 `UNINDEXED` 列，按 id 单条删除会反复扫描虚拟表；有大量变更符号时刷新开销随变更数和索引规模相乘增长。
@@ -16,7 +22,7 @@
 
 ### 2026-11-04 — Dart、Go、Kotlin grammar 与局部关系
 
-- 复用 `@vscode/tree-sitter-wasm` runtime 和其 Go grammar；Dart grammar 固定上游 `UserNobody14/tree-sitter-dart` revision `a9bdfa3db2fbc9b9f12c93450d04a671f33a5102`，Kotlin grammar 固定 `tree-sitter-grammars/tree-sitter-kotlin` v1.1.0。Dart/Kotlin WASM 资产与原始 MIT license 随包发布，`grammars/sources.json` 记录 npm 获取来源和 revision，SHA-256 在 runtime 加载时核验。避免直接依赖 node engines >=26 的 Dart/Kotlin npm WASM wrapper，保持项目 Node >=22.19 契约。
+- 复用 `@vscode/tree-sitter-wasm` runtime 和其 Go grammar；Dart grammar 固定上游 `UserNobody14/tree-sitter-dart` revision `a9bdfa3db2fbc9b9f12c93450d04a671f33a5102`。Kotlin grammar 最初通过 `@binclusive/tree-sitter-kotlin-wasm` 分发；该 WASM 资源已由 v1.1.0 上游源码及仓库 patch 重建取代，原因与当前固定来源见同日后续的 `open` 软关键字决策。Dart/Kotlin WASM 资产与原始 MIT license 随包发布，SHA-256 在 runtime 加载时核验。避免直接依赖 node engines >=26 的 Dart/Kotlin npm WASM wrapper，保持项目 Node >=22.19 契约。
 - 仅以语法树解析声明、UTF-16源码位置、包含和可唯一确认的同文件调用；遮蔽、重载歧义、未知接收者、跨文件/导入和框架运行时语义不猜测。扩展支持的文件后缀同步使旧索引配置失效。
 - 实际 grammar hashes 见 `grammars/sources.json` 及可执行完整性检查；README 记录能力与限制，完整验证见 [会话记录](session-log.md)。
 

@@ -8,6 +8,14 @@
 
 ## 会话
 
+### 2026-11-04 — 修复 Kotlin `open` 属性名导致的语法树级联错误
+
+- FlClash 的 `SingBoxSessionTest.kt` 使用合法 Kotlin 属性 `var open = true`。固定 grammar v1.1.0 将 `open` 当作修饰符后会产生 ERROR，级联把 `Resource` 识别为 enum 并漏掉后续方法/关系，原文件仅得到 11 个符号、8 条关系并带 parse warning。根因是上游 grammar 没把 `open` 纳入可按语境解释的 reserved identifier。
+- 对上游 v1.1.0 固定源码应用 `grammars/kotlin-open-identifier.patch`：为 `inheritance_modifier` / `_reserved_identifier` 增加冲突规则并将 `open` 加入 reserved identifiers。用 Tree-sitter CLI 0.25.10 / Emscripten 4.0.10 构建 `grammars/kotlin.wasm`，记录源档案、patch、构建命令与哈希到 `grammars/sources.json`。索引配置从 `syntax-v1` 升至 `syntax-v2`，使旧的符号、类型和 warning 快照在查询时自动重建。
+- 新增回归覆盖 `open` 作为属性名及类/方法修饰符、调用关系和旧索引迁移；生产安装测试也解析包含该属性的 Kotlin 文件并要求无 warning。
+- 验证：固定 grammar 上游 corpus `tree-sitter test` 22/22；`npm run build`；`npm test` 83/83；`tsc --noEmit`；Biome 对改动 TypeScript 文件无 error；`git diff --check`。FlClash 原始 `SingBoxSessionTest.kt` 未修改，使用更新后的 parser 提取 84 个符号、79 条关系、0 warning，`Resource` 恢复为 class。
+- 遗留：尚未更新 `~/.pi/agent/git/github.com/CGOSU/pi-graph` 中正在被 FlClash 使用的安装副本；安装副本的 Kotlin WASM 哈希仍为旧值。需更新该副本并重启 session 才会在 FlClash 实际生效。
+
 ### 2026-11-04 — 批量优化 FTS5 文档同步
 
 - `GraphStore.writeSymbols` 原先对每个变更或删除的符号单独执行 FTS5 `DELETE ... WHERE id=?`。因 id 未索引，刷新大量符号时形成重复全表扫描。现在收集移除 ID 后用单条 `DELETE ... IN (SELECT value FROM json_each(?))` 批量清理，再插入更新文档；新增文档不做多余删除。

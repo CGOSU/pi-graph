@@ -15,7 +15,8 @@ test("production-only Git-style installation builds without host, dev, or native
     "project/src/lib.rs": source,
     "project/view.dart": "void dartProbe() {}\n",
     "project/core.go": "package core\nfunc GoProbe() {}\n",
-    "project/service.kt": "fun kotlinProbe() {}\n",
+    "project/service.kt":
+      "private class Resource : AutoCloseable {\n var open = true\n override fun close() { open = false }\n}\nfun kotlinProbe() {}\n",
   });
   try {
     const destination = join(f.root, "package");
@@ -61,6 +62,7 @@ test("production-only Git-style installation builds without host, dev, or native
       "grammars/dart.LICENSE",
       "grammars/dart-upstream.LICENSE",
       "grammars/kotlin.LICENSE",
+      "grammars/kotlin-open-identifier.patch",
       "grammars/sources.json",
     ])
       assert(paths.includes(path), `Published package must include ${path}`);
@@ -102,6 +104,7 @@ test("production-only Git-style installation builds without host, dev, or native
         const result = await client.locate({ query: name });
         const found = result.results.find((item) => item.name === name);
         assert(found, name);
+        assert.deepEqual(result.warnings, []);
         assert((await client.inspect({ id: found.id })).source.includes(`${name}()`));
       }
     } finally {
