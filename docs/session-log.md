@@ -8,6 +8,12 @@
 
 ## 会话
 
+### 2026-11-04 — 精确匹配与查询性能审查
+
+- 对 HEAD `0d69a0a` 做只读审查，源码未修改，以下问题尚未修复。临时目录脚本在当前 `dist` 上断言通过：单字符/停用词过滤与空 terms 检查使 `x`、`to`、`$`、`_`、`$a`、`_a`、`X.y` 无结果；`Remote.x` 可召回，但正文含 105 个唯一词、仅命中 `remote`，置信度约 0.55、低于 1.4 门槛，候选被删至只剩 `Remote`。限定名与短名同优先级：80 条正文词 `run`/`cache`/`owner` 命中的干扰符号加 40 个 `runCache` 时，查询 `Owner.runCache and runCache` 丢失目标；干扰项为 39 个时目标居首。`Parser.load` 与 `parser.load` 同分时错误大小写先出；对照中 `readHTTPResponse` 原样查询成功，全小写 `readhttpresponse` 和全大写 `READHTTPRESPONSE` 失败。边界样例还发现组合重音标识符被截断、非 ASCII 大小写归一差异可能漏召回、`scope=src` 的 LIKE 匹配也命中 `SRC/b.ts`。
+- 合成性能微基准在 Node 26.11.1 / SQLite 3.54.0 / darwin arm64 上交错运行 21 次热查询。60k 符号下，仅给既有 FTS 名称 lane 增加两表达式索引和名称 ID 预过滤的原型由 51.434 降至 15.422 ms，前 40 个 ID 与顺序一致；它仍受 FTS 语义约束，**不是独立精确匹配通道**，且未计索引建立/写维护成本。普通 FTS 不限 scope 时改按既有 rank 排序由 33.229 降至 21.337 ms，窄 scope（59 条）则由 26.724 升至 87.140 ms；故不能据此统一替换。高连接度节点双向 top-K 索引原型（1.8 万边）由 1.201 降至 0.039 ms，额外索引写成本未测；同分文档测试也显示显式 tie-break 会改变候选，使用 rowid 恢复排序需保留临时排序。
+- 复现命令为 `node /private/tmp/pi-graph-exact-audit.TnFmwX/repro.mjs /Users/cgosu/code/JavaScript/pi-graph`；性能命令为 `node /private/tmp/pi-graph-perf-audit.mjs 6000`、`node /private/tmp/pi-graph-perf-audit.mjs 60000` 和 `node /private/tmp/pi-graph-rank-tie.mjs`。这些脚本位于临时目录，不在仓库中。上述是合成查询/SQL 原型，不代表端到端或真实仓库收益。可评估的方向包括独立索引精确名称通道、精确命中与置信度门槛解耦、截断前保留完整限定名及大小写优先规则；均为建议，未实施。本轮执行 `npm run build`（成功）和 `node --test dist/tests/retrieval.test.js dist/tests/store.test.js`（8/8）；未运行全量测试。
+
 ### 2026-11-04 — 修复混合检索的名称候选丢失与局部变量挤占
 
 - 完成 `src/core/store.ts` 与 `src/core/retrieval.ts` 修复：名称候选使用有界召回；精确命中排序不再抬高置信度门槛；多概念行为查询用真实 `contains` 关系归并局部变量线索。新增 `tests/retrieval.test.ts`，并扩展 Go 混合查询及精确变量回归。根因和长期检索规则分别记于 [踩坑记录](pitfalls.md) 与 [设计决策](decisions.md)。
