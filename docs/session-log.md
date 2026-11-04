@@ -8,6 +8,13 @@
 
 ## 会话
 
+### 2026-11-04 — 批量优化 FTS5 文档同步
+
+- `GraphStore.writeSymbols` 原先对每个变更或删除的符号单独执行 FTS5 `DELETE ... WHERE id=?`。因 id 未索引，刷新大量符号时形成重复全表扫描。现在收集移除 ID 后用单条 `DELETE ... IN (SELECT value FROM json_each(?))` 批量清理，再插入更新文档；新增文档不做多余删除。
+- 新增 1,400 符号回归，覆盖文档更新、删除、新增、稳定文档保留、带引号 ID、全文查询结果和重开已有数据库。
+- 验证：`npm run build`；`node --test dist/tests/store.test.js dist/tests/persistence.test.js`（9/9）；Biome 目标文件检查无错误（显示的 2 个 `noNonNullAssertion` 警告位于未改动的既有断言）；`git diff --check`。本机合成基准：8,000 符号首次/批量更新由 1,751/3,251 ms 降至 30/33 ms；16,000 符号由 7,197/12,628 ms 降至 53/69 ms。FlClash 持久化快照（2,123 文件、93,619 符号、85,215 关系）复制到临时数据库后，写入耗时 849 ms，更新事务完整性、93,619 条全文文档的 id/content 一致性与检索均通过；未改原缓存。
+- 范围：测得的 FlClash 数据只验证 SQLite 存储阶段，不覆盖扫描/解析耗时；FlClash 加载的 Pi 安装副本位于 `~/.pi/agent/git/github.com/CGOSU/pi-graph`，当前工作区与安装副本源码不同，因此本次改动尚未作用于正在运行的 FlClash session；需将优化部署到该副本并重启 session 才会生效。
+
 ### 2026-11-04 — Dart、Go、Kotlin 语法索引
 
 - 扫描与 worker 支持 `.dart`、`.go`、`.kt`、`.kts`，保留现有 Rust/TS/Vue 管线。Dart/Kotlin 固定 WASM grammar 随包发布、带 MIT 许可证及来源 SHA-256 manifest；Go 使用既有 `@vscode/tree-sitter-wasm` grammar。按语法树提供常见声明、UTF-16源码范围、包含和有限同文件调用；歧义或未知关系不猜，语法错误 warning 表示覆盖不完整。适用边界见 [README](../README.md#实现边界)。

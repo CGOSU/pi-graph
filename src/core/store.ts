@@ -108,7 +108,8 @@ export class GraphStore {
       "INSERT INTO symbols(id,path,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,data=excluded.data",
     );
     const addDocument = this.prepare("INSERT INTO documents(id,document) VALUES (?,?)");
-    const removeDocument = this.prepare("DELETE FROM documents WHERE id=?");
+    const removedDocuments: string[] = [];
+    const changedDocuments: GraphSymbol[] = [];
     for (const symbol of symbols) {
       const data = JSON.stringify(symbol);
       const previous = old.get(symbol.id);
@@ -116,15 +117,22 @@ export class GraphStore {
       if (previous === data) continue;
       upsert.run(symbol.id, symbol.path, data);
       if (!previous || (JSON.parse(previous) as GraphSymbol).document !== symbol.document) {
-        removeDocument.run(symbol.id);
-        addDocument.run(symbol.id, symbol.document);
+        if (previous !== undefined) removedDocuments.push(symbol.id);
+        changedDocuments.push(symbol);
       }
     }
     const removeSymbol = this.prepare("DELETE FROM symbols WHERE id=?");
     for (const id of old.keys()) {
       removeSymbol.run(id);
-      removeDocument.run(id);
+      removedDocuments.push(id);
     }
+    if (removedDocuments.length) {
+      // FTS5 cannot index id equality: batch removals into one scan, not one per symbol.
+      this.prepare("DELETE FROM documents WHERE id IN (SELECT value FROM json_each(?))").run(
+        JSON.stringify(removedDocuments),
+      );
+    }
+    for (const symbol of changedDocuments) addDocument.run(symbol.id, symbol.document);
   }
   private writeFiles(files: FileRecord[]): void {
     const old = new Map(this.files().map((file) => [file.path, file.hash]));

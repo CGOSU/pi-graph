@@ -192,6 +192,56 @@ test("SQL failures roll back graph, FTS and metadata and cached statements recov
   });
 });
 
+test("bulk FTS changes preserve persisted searches without stale or duplicate documents", async () => {
+  await withStore((store, db, root) => {
+    const symbols = Array.from({ length: 1400 }, (_, i) => {
+      const term = i < 1100 ? "obsoleteword" : i < 1200 ? "stableword" : "removedword";
+      return symbol(i === 0 ? "odd'\"?\n%_id" : `symbol${i}`, "bulk.ts", `${term} token${i}`);
+    });
+    const files = [{ path: "bulk.ts", hash: "initial" }];
+    store.commit(files, symbols, [], "config");
+    const stableDocuments = db
+      .prepare(
+        "SELECT rowid,id,document FROM documents WHERE document LIKE 'stableword%' ORDER BY id",
+      )
+      .all();
+    const current = symbols
+      .slice(0, 1200)
+      .map((entry, i) =>
+        i < 1100 ? { ...entry, document: `updatedword token${i}`, hash: "updated" } : entry,
+      );
+    current.push(symbol("new'\"?\n%_id", "bulk.ts", "addedword"));
+    const reopened = new GraphStore(join(root, "index.sqlite"));
+    try {
+      reopened.commit([{ path: "bulk.ts", hash: "updated" }], current, [], "config");
+      assert.deepEqual(
+        db
+          .prepare("SELECT id,document FROM documents ORDER BY id")
+          .all()
+          .map((row) => ({ ...row })),
+        current
+          .map(({ id, document }) => ({ id, document }))
+          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+      );
+      assert.deepEqual(
+        db
+          .prepare(
+            "SELECT rowid,id,document FROM documents WHERE document LIKE 'stableword%' ORDER BY id",
+          )
+          .all(),
+        stableDocuments,
+      );
+      assert.deepEqual(reopened.search(["obsoleteword", "removedword"]), []);
+      for (const entry of current.filter((entry) => entry.id.includes("'"))) {
+        assert.deepEqual(reopened.search([entry.document]), [entry]);
+      }
+      assert.equal(reopened.counts().symbols, current.length);
+    } finally {
+      reopened.close();
+    }
+  });
+});
+
 test("batch symbol reads bind quoted IDs and see new persisted data after reuse", async () => {
   await withStore((store) => {
     const quoted = symbol("odd'\"?\n%_id", "quoted.ts", "quoted");

@@ -8,6 +8,12 @@
 
 ## 已确认决策
 
+### 2026-11-04 — 批量更新 SQLite FTS5 文档
+
+- `documents.id` 在 FTS5 中是 `UNINDEXED` 列，按 id 单条删除会反复扫描虚拟表；有大量变更符号时刷新开销随变更数和索引规模相乘增长。
+- 收集所有变更/删除文档的 ID 后执行一次 `DELETE ... id IN (SELECT value FROM json_each(?))`，再插入新增/更新文档；不受影响的全文文档保持原样，事务和公开检索语义不变。新增批量检索回归，并以真实语料规模验证更新路径。
+- 该优化只覆盖 SQLite 持久化阶段，不代表解析、全项目扫描或关系构建已变为局部增量；真实数据测量和待部署边界见 [会话记录](session-log.md)。
+
 ### 2026-11-04 — Dart、Go、Kotlin grammar 与局部关系
 
 - 复用 `@vscode/tree-sitter-wasm` runtime 和其 Go grammar；Dart grammar 固定上游 `UserNobody14/tree-sitter-dart` revision `a9bdfa3db2fbc9b9f12c93450d04a671f33a5102`，Kotlin grammar 固定 `tree-sitter-grammars/tree-sitter-kotlin` v1.1.0。Dart/Kotlin WASM 资产与原始 MIT license 随包发布，`grammars/sources.json` 记录 npm 获取来源和 revision，SHA-256 在 runtime 加载时核验。避免直接依赖 node engines >=26 的 Dart/Kotlin npm WASM wrapper，保持项目 Node >=22.19 契约。

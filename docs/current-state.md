@@ -23,6 +23,7 @@
 
 ## 最近一次更新
 
+- 2026-11-04：优化 SQLite FTS5 文档批量更新，避免每个变更符号各自扫描全文索引；FlClash 93,619 符号快照在临时库通过数据一致性与检索验证。实现细节和边界见 [设计决策](decisions.md) 与 [会话记录](session-log.md)。
 - 2026-11-04：新增 Dart、Go、Kotlin 符号导航与保守的同文件调用关系；grammar 资产随包发布并固定校验和。全量测试通过，见 [设计决策](decisions.md) 和 [会话记录](session-log.md)。
 - 2026-11-04：Rust parser 改用 WASM，去除原生 addon 安装要求；生产安装与全量回归通过，Android 真机尚未验证。见 [设计决策](decisions.md) 和 [会话记录](session-log.md)。
 - 2026-11-04：完成监听/刷新与持久化诊断修复，隔离安装及全量回归通过；验证见 [会话记录](session-log.md)。
