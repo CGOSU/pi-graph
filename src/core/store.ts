@@ -16,16 +16,29 @@ interface EdgeRow {
 function edgeKey(edge: Pick<GraphEdge, "source" | "target" | "kind"> | EdgeRow): string {
   return JSON.stringify([edge.source, edge.target, edge.kind]);
 }
+
+const scopePredicate = "s.path=? OR (s.path>=? AND s.path<?)";
+function scopeBounds(scope: string): [string, string, string] {
+  // In SQLite's BINARY collation, '0' immediately follows '/'.
+  return [scope, `${scope}/`, `${scope}0`];
+}
+
 export class GraphStore {
   private db: DatabaseSync;
   private statements = new Map<string, StatementSync>();
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-    this.db.exec(
-      "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, path TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path); CREATE TABLE IF NOT EXISTS edges (source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,target,kind)); CREATE INDEX IF NOT EXISTS edges_target ON edges(target); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(id UNINDEXED, document, tokenize='unicode61');",
-    );
+    this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    try {
+      this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+      this.db.exec(
+        "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, path TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path); CREATE TABLE IF NOT EXISTS edges (source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,target,kind)); CREATE INDEX IF NOT EXISTS edges_target ON edges(target); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(id UNINDEXED, document, tokenize='unicode61');",
+      );
+      this.initializeNames();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
   private prepare(sql: string): StatementSync {
     let statement = this.statements.get(sql);
@@ -34,6 +47,40 @@ export class GraphStore {
       this.statements.set(sql, statement);
     }
     return statement;
+  }
+  private initializeNames(): void {
+    const nameTable = this.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='symbol_names'",
+    );
+    if (nameTable.get()) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // A concurrent opener may have already migrated the index while we waited for the lock.
+      if (!nameTable.get()) {
+        this.db.exec(`CREATE TABLE symbol_names (
+          symbol_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          folded_name TEXT NOT NULL,
+          qualified INTEGER NOT NULL,
+          PRIMARY KEY(symbol_id, qualified)
+        ) WITHOUT ROWID`);
+        for (const row of this.prepare("SELECT data FROM symbols").iterate()) {
+          this.insertNames(JSON.parse(row.data as string) as GraphSymbol);
+        }
+        this.db.exec("CREATE INDEX symbol_names_folded ON symbol_names(folded_name, name)");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  private insertNames({ id, name, qualifiedName }: GraphSymbol): void {
+    const insert = this.prepare(
+      "INSERT INTO symbol_names(symbol_id,name,folded_name,qualified) VALUES (?,?,?,?)",
+    );
+    insert.run(id, name, name.toLowerCase(), 0);
+    if (qualifiedName !== name) insert.run(id, qualifiedName, qualifiedName.toLowerCase(), 1);
   }
   files(): FileRecord[] {
     return this.prepare("SELECT path, hash FROM files").all() as unknown as FileRecord[];
@@ -107,6 +154,7 @@ export class GraphStore {
     const upsert = this.prepare(
       "INSERT INTO symbols(id,path,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,data=excluded.data",
     );
+    const removeNames = this.prepare("DELETE FROM symbol_names WHERE symbol_id=?");
     const addDocument = this.prepare("INSERT INTO documents(id,document) VALUES (?,?)");
     const removedDocuments: string[] = [];
     const changedDocuments: GraphSymbol[] = [];
@@ -116,8 +164,18 @@ export class GraphStore {
       old.delete(symbol.id);
       if (previous === data) continue;
       upsert.run(symbol.id, symbol.path, data);
-      if (!previous || (JSON.parse(previous) as GraphSymbol).document !== symbol.document) {
-        if (previous !== undefined) removedDocuments.push(symbol.id);
+      const previousSymbol =
+        previous === undefined ? undefined : (JSON.parse(previous) as GraphSymbol);
+      if (
+        !previousSymbol ||
+        previousSymbol.name !== symbol.name ||
+        previousSymbol.qualifiedName !== symbol.qualifiedName
+      ) {
+        if (previousSymbol) removeNames.run(symbol.id);
+        this.insertNames(symbol);
+      }
+      if (previousSymbol?.document !== symbol.document) {
+        if (previousSymbol) removedDocuments.push(symbol.id);
         changedDocuments.push(symbol);
       }
     }
@@ -167,46 +225,51 @@ export class GraphStore {
     for (const edge of old.values()) remove.run(edge.source, edge.target, edge.kind);
   }
   search(terms: string[], scope?: string, identifiers: string[] = []): GraphSymbol[] {
-    if (!terms.length) return [];
-    const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
-    const escapedScope = scope?.replace(/[\\%_]/g, "\\$&");
-    const rows = this.prepare(
-      "SELECT s.data FROM documents d JOIN symbols s ON s.id=d.id WHERE documents MATCH ? AND (? IS NULL OR s.path=? OR s.path LIKE ? ESCAPE '\\') ORDER BY bm25(documents) LIMIT 80",
-    ).all(
-      match,
-      scope ?? null,
-      scope ?? null,
-      escapedScope ? `${escapedScope}/%` : null,
-    ) as unknown as SymbolRow[];
-    // Keep a separate, bounded name lane so body matches cannot exhaust recall first.
-    const identifierNames = JSON.stringify(identifiers.slice(0, 32));
-    const named = this.prepare(
-      `WITH names AS (SELECT value FROM json_each(?))
-       SELECT s.data FROM documents d JOIN symbols s ON s.id=d.id
-       WHERE documents MATCH ? AND (? IS NULL OR s.path=? OR s.path LIKE ? ESCAPE '\\')
-         AND (lower(json_extract(s.data,'$.name')) IN (SELECT value FROM names)
-           OR lower(json_extract(s.data,'$.qualifiedName')) IN (SELECT value FROM names))
-       ORDER BY CASE
-         WHEN lower(json_extract(s.data,'$.name')) IN (SELECT value FROM json_each(?))
-           OR lower(json_extract(s.data,'$.qualifiedName')) IN (SELECT value FROM json_each(?))
-         THEN 0 ELSE 1 END,
-         CASE json_extract(s.data,'$.kind') WHEN 'function' THEN 0 WHEN 'method' THEN 0 ELSE 1 END,
-         bm25(documents),s.id LIMIT 40`,
-    ).all(
-      JSON.stringify([...new Set([...terms, ...identifiers])].slice(0, 64)),
-      match,
-      scope ?? null,
-      scope ?? null,
-      escapedScope ? `${escapedScope}/%` : null,
-      identifierNames,
-      identifierNames,
-    ) as unknown as SymbolRow[];
     const symbols = new Map<string, GraphSymbol>();
-    for (const row of [...rows, ...named]) {
+    const rows = [...this.searchText(terms, scope), ...this.searchNames(terms, identifiers, scope)];
+    for (const row of rows) {
       const symbol = JSON.parse(row.data) as GraphSymbol;
       symbols.set(symbol.id, symbol);
     }
     return [...symbols.values()];
+  }
+  private searchText(terms: string[], scope?: string): SymbolRow[] {
+    if (!terms.length) return [];
+    const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
+    // With a scope, FTS rank can sort the entire corpus before the path filter fills the limit.
+    const scopeFilter = scope ? ` AND (${scopePredicate})` : "";
+    const order = scope ? "bm25(documents)" : "d.rank";
+    return this.prepare(
+      `SELECT s.data FROM documents d JOIN symbols s ON s.id=d.id
+       WHERE documents MATCH ?${scopeFilter} ORDER BY ${order} LIMIT 80`,
+    ).all(match, ...(scope ? scopeBounds(scope) : [])) as unknown as SymbolRow[];
+  }
+  private searchNames(terms: string[], identifiers: string[], scope?: string): SymbolRow[] {
+    if (!terms.length && !identifiers.length) return [];
+    const foldedNames = identifiers.map((name) => name.toLowerCase());
+    const hints = terms.slice(0, 32).map((term) => term.toLowerCase());
+    const foldedCandidates = [...new Set([...foldedNames, ...hints])];
+    const scopeFilter = scope ? ` WHERE ${scopePredicate}` : "";
+    return this.prepare(
+      `WITH matches AS (
+         SELECT symbol_id, max(CASE
+           WHEN name IN (SELECT value FROM json_each(?)) THEN 3 + qualified
+           WHEN folded_name IN (SELECT value FROM json_each(?)) THEN 1 + qualified
+           ELSE 0 END) AS priority
+         FROM symbol_names
+         WHERE folded_name IN (SELECT value FROM json_each(?))
+         GROUP BY symbol_id
+       )
+       SELECT s.data FROM matches JOIN symbols s ON s.id=matches.symbol_id${scopeFilter}
+       ORDER BY matches.priority DESC,
+         CASE json_extract(s.data,'$.kind') WHEN 'function' THEN 0 WHEN 'method' THEN 0 ELSE 1 END,
+         s.id LIMIT 40`,
+    ).all(
+      JSON.stringify(identifiers),
+      JSON.stringify(foldedNames),
+      JSON.stringify(foldedCandidates),
+      ...(scope ? scopeBounds(scope) : []),
+    ) as unknown as SymbolRow[];
   }
   containers(ids: string[]): GraphEdge[] {
     if (!ids.length) return [];

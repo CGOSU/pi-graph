@@ -8,9 +8,16 @@
 
 ## 会话
 
+### 2026-11-04 — 独立精确名称通道修复与性能验证
+
+- 完成独立精确名称通道与旧库迁移：原样或大小写折叠的短名/限定名分级召回，保留 Unicode 组合字符，并在候选截断前严格匹配 scope；匹配等级、SQLite schema 和事务机制见[设计决策](decisions.md)。涉及实现 `src/core/names.ts`、`src/core/retrieval.ts` 与 `src/core/store.ts`。
+- 新增 3 项精确匹配与 3 项 store 回归，均先在修复前复现失败。验证：`npm run build`；针对性测试 32/32；`npm test` 共 95 项、94 项通过，唯一失败为 production-only 安装测试的 npm cache `EPERM`。以授权权限单独重跑 `npm_execpath=/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js node --test dist/tests/production.test.js` 后 1/1 通过。`node_modules/.bin/tsc --noEmit`、`node_modules/.bin/biome check src/core/store.ts src/core/names.ts src/core/retrieval.ts tests/store.test.ts tests/exact-matching.test.ts` 和 `git diff --check` 均通过；Biome 保留 `tests/store.test.ts` 两条既有 `noNonNullAssertion` warning。全量命令本身曾因权限错误退出，不记作全量命令通过。
+- 最终 GraphStore 合成对照使用 baseline `4631e69` 的临时转译模块和当前 `dist`，各自独立临时库；Node 26.11.1 / SQLite 3.54.0 / darwin arm64，无并行测试干扰的 21 次交错热查询。60k symbols：exact 48.176→29.182 ms，mixed compile/cache/route 90.428→62.806 ms，scoped mixed 56.492→29.190 ms；候选集合一致，顺序不要求完全相同。首建 commit 中位 245.111→332.156 ms，数据库 54,472,704→62,115,840 bytes（约 +14%）；旧库迁移 122.187 ms。单 symbol 更新/改名中位数基本不变（62.880→63.234 ms；55.421→55.976 ms）。运行命令 `node /private/tmp/pi-graph-store-final-bench.mjs`，输出见 `/private/tmp/pi-graph-store-final-bench.clean.log`。
+- 这些是合成 `GraphStore.search` 数据，不代表端到端或真实仓库收益；索引提升热查询同时增加首次写入时间和数据库体积。本次未触碰真实索引或 Pi 安装副本；需更新正在使用的安装副本并重启旧扩展会话才会在运行中生效。旧库重开迁移受支持；不保证旧版本程序并行写入新名称 schema。
+
 ### 2026-11-04 — 精确匹配与查询性能审查
 
-- 对 HEAD `0d69a0a` 做只读审查，源码未修改，以下问题尚未修复。临时目录脚本在当前 `dist` 上断言通过：单字符/停用词过滤与空 terms 检查使 `x`、`to`、`$`、`_`、`$a`、`_a`、`X.y` 无结果；`Remote.x` 可召回，但正文含 105 个唯一词、仅命中 `remote`，置信度约 0.55、低于 1.4 门槛，候选被删至只剩 `Remote`。限定名与短名同优先级：80 条正文词 `run`/`cache`/`owner` 命中的干扰符号加 40 个 `runCache` 时，查询 `Owner.runCache and runCache` 丢失目标；干扰项为 39 个时目标居首。`Parser.load` 与 `parser.load` 同分时错误大小写先出；对照中 `readHTTPResponse` 原样查询成功，全小写 `readhttpresponse` 和全大写 `READHTTPRESPONSE` 失败。边界样例还发现组合重音标识符被截断、非 ASCII 大小写归一差异可能漏召回、`scope=src` 的 LIKE 匹配也命中 `SRC/b.ts`。
+- 当时基于 HEAD `0d69a0a` 的只读审查发现以下问题；这些问题后来由本文件上方的修复记录处理。临时目录脚本在当时的 `dist` 上断言通过：单字符/停用词过滤与空 terms 检查使 `x`、`to`、`$`、`_`、`$a`、`_a`、`X.y` 无结果；`Remote.x` 可召回，但正文含 105 个唯一词、仅命中 `remote`，置信度约 0.55、低于 1.4 门槛，候选被删至只剩 `Remote`。限定名与短名同优先级：80 条正文词 `run`/`cache`/`owner` 命中的干扰符号加 40 个 `runCache` 时，查询 `Owner.runCache and runCache` 丢失目标；干扰项为 39 个时目标居首。`Parser.load` 与 `parser.load` 同分时错误大小写先出；对照中 `readHTTPResponse` 原样查询成功，全小写 `readhttpresponse` 和全大写 `READHTTPRESPONSE` 失败。边界样例还发现组合重音标识符被截断、非 ASCII 大小写归一差异可能漏召回、`scope=src` 的 LIKE 匹配也命中 `SRC/b.ts`。
 - 合成性能微基准在 Node 26.11.1 / SQLite 3.54.0 / darwin arm64 上交错运行 21 次热查询。60k 符号下，仅给既有 FTS 名称 lane 增加两表达式索引和名称 ID 预过滤的原型由 51.434 降至 15.422 ms，前 40 个 ID 与顺序一致；它仍受 FTS 语义约束，**不是独立精确匹配通道**，且未计索引建立/写维护成本。普通 FTS 不限 scope 时改按既有 rank 排序由 33.229 降至 21.337 ms，窄 scope（59 条）则由 26.724 升至 87.140 ms；故不能据此统一替换。高连接度节点双向 top-K 索引原型（1.8 万边）由 1.201 降至 0.039 ms，额外索引写成本未测；同分文档测试也显示显式 tie-break 会改变候选，使用 rowid 恢复排序需保留临时排序。
 - 复现命令为 `node /private/tmp/pi-graph-exact-audit.TnFmwX/repro.mjs /Users/cgosu/code/JavaScript/pi-graph`；性能命令为 `node /private/tmp/pi-graph-perf-audit.mjs 6000`、`node /private/tmp/pi-graph-perf-audit.mjs 60000` 和 `node /private/tmp/pi-graph-rank-tie.mjs`。这些脚本位于临时目录，不在仓库中。上述是合成查询/SQL 原型，不代表端到端或真实仓库收益。可评估的方向包括独立索引精确名称通道、精确命中与置信度门槛解耦、截断前保留完整限定名及大小写优先规则；均为建议，未实施。本轮执行 `npm run build`（成功）和 `node --test dist/tests/retrieval.test.js dist/tests/store.test.js`（8/8）；未运行全量测试。
 

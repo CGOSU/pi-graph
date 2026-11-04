@@ -258,3 +258,114 @@ test("batch symbol reads bind quoted IDs and see new persisted data after reuse"
     assert.equal(store.symbols([quoted.id]).size, 0);
   });
 });
+
+test("name lookup ranks exact spelling and qualification before the candidate limit", async () => {
+  await withStore((store) => {
+    const shadowing = Array.from({ length: 45 }, (_, index) => ({
+      ...symbol(`shadow${index}`, "src/shadows.ts", "unrelated"),
+      name: "é",
+      qualifiedName: "é",
+    }));
+    const exactShort = {
+      ...symbol("exactShort", "src/short.ts", "unrelated"),
+      name: "É",
+      qualifiedName: "É",
+    };
+    const exactQualified = {
+      ...symbol("exactQualified", "src/qualified.ts", "unrelated"),
+      name: "É",
+      qualifiedName: "Store.É",
+      kind: "property" as const,
+    };
+    const foldedQualified = {
+      ...symbol("foldedQualified", "src/folded.ts", "unrelated"),
+      name: "é",
+      qualifiedName: "store.é",
+    };
+    store.commit([], [...shadowing, exactShort, exactQualified, foldedQualified], [], "config");
+
+    const identifiers = Array.from({ length: 35 }, (_, index) => `unused${index}`);
+    const result = store.search([], undefined, [...identifiers, "É", "Store.É"]);
+    assert.equal(result.length, 40);
+    assert.deepEqual(result.slice(0, 3), [exactQualified, exactShort, foldedQualified]);
+    assert.deepEqual(store.search(["store.é"], "src/qualified.ts"), [exactQualified]);
+  });
+});
+
+test("both candidate lanes apply literal case-sensitive scope before their limits", async () => {
+  await withStore((store) => {
+    const inScope = symbol("inside", "src/100%_done/main.ts", "common");
+    const file = symbol("file", "src/100%_done", "common");
+    const outside = Array.from({ length: 120 }, (_, index) => ({
+      ...symbol(`outside${index}`, "SRC/100%_done/main.ts", "common"),
+      name: "inside",
+      qualifiedName: "inside",
+    }));
+    const wildcard = symbol("wildcard", "src/100XXdone/main.ts", "common");
+    store.commit([], [...outside, wildcard, inScope, file], [], "config");
+
+    assert.deepEqual(
+      store
+        .search(["common"], "src/100%_done")
+        .map(({ id }) => id)
+        .sort(),
+      [file.id, inScope.id],
+    );
+    assert.deepEqual(store.search([], "src/100%_done", ["inside"]), [inScope]);
+  });
+});
+
+test("opening a legacy database backfills names and later changes are atomic", async () => {
+  await withStore((store, db, root) => {
+    const previous = {
+      ...symbol("rename", "src/rename.ts", "body"),
+      name: "İş",
+      qualifiedName: "Store.İş",
+    };
+    const renamed = { ...previous, name: "x", qualifiedName: "Store.x" };
+    const added = symbol("newName", "src/new.ts", "body");
+    const removed = symbol("removedName", "src/old.ts", "body");
+    store.commit([], [previous, removed], [], "config");
+    db.exec("DROP TABLE IF EXISTS symbol_names");
+
+    const indexPath = join(root, "index.sqlite");
+    const updateData = db.prepare("UPDATE symbols SET data=? WHERE id=?");
+    updateData.run("invalid JSON", removed.id);
+    assert.throws(() => new GraphStore(indexPath), SyntaxError);
+    assert.equal(
+      db.prepare("SELECT 1 FROM sqlite_schema WHERE name='symbol_names'").get(),
+      undefined,
+    );
+    updateData.run(JSON.stringify(removed), removed.id);
+
+    const reopened = new GraphStore(indexPath);
+    try {
+      assert.equal(reopened.metadata("revision"), "1");
+      assert.deepEqual(reopened.search([], undefined, ["store.i\u0307ş"]), [previous]);
+      db.exec(`CREATE TRIGGER fail_names_commit BEFORE UPDATE ON metadata
+        WHEN NEW.key='configHash' AND NEW.value='fail'
+        BEGIN SELECT RAISE(ABORT,'injected name commit failure'); END`);
+      assert.throws(
+        () => reopened.commit([], [renamed, added], [], "fail"),
+        /injected name commit failure/,
+      );
+      assert.deepEqual(reopened.search([], undefined, ["Store.İş", "removedName"]), [
+        previous,
+        removed,
+      ]);
+      assert.deepEqual(reopened.search([], undefined, ["x", "newName"]), []);
+
+      reopened.commit([], [renamed, added], [], "config");
+      assert.deepEqual(reopened.search([], undefined, ["Store.İş", "removedName"]), []);
+      assert.deepEqual(reopened.search([], undefined, ["Store.x", "newName"]), [renamed, added]);
+      const latest = new GraphStore(indexPath);
+      try {
+        assert.deepEqual(latest.search([], undefined, ["x"]), [renamed]);
+      } finally {
+        latest.close();
+      }
+    } finally {
+      reopened.close();
+    }
+  });
+});

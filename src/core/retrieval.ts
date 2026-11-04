@@ -1,4 +1,5 @@
 import { safeScope } from "./files.js";
+import { extractIdentifiers, nameMatch } from "./names.js";
 import type { GraphStore } from "./store.js";
 import { queryTokenGroups, tokens } from "./text.js";
 import type { GraphEdge, GraphSymbol, LocatedSymbol, LocateInput, LocateResult } from "./types.js";
@@ -7,6 +8,7 @@ interface Candidate {
   symbol: GraphSymbol;
   score: number;
   confidence: number;
+  namePriority: number;
   reason: string;
   edge?: GraphEdge;
 }
@@ -16,14 +18,9 @@ function inScope(symbol: GraphSymbol, scope?: string): boolean {
 interface MatchQuery {
   groups: string[][];
   identifiers: Set<string>;
+  foldedIdentifiers: Set<string>;
 }
-function exactMatch(symbol: GraphSymbol, identifiers: Set<string>): boolean {
-  return (
-    identifiers.has(symbol.qualifiedName.toLowerCase()) ||
-    identifiers.has(symbol.name.toLowerCase())
-  );
-}
-function relevance(symbol: GraphSymbol, { groups, identifiers }: MatchQuery) {
+function relevance(symbol: GraphSymbol, { groups, identifiers, foldedIdentifiers }: MatchQuery) {
   const names = new Set(tokens(symbol.name));
   const document = new Set(symbol.document.split(" "));
   const path = new Set(tokens(symbol.path));
@@ -43,11 +40,15 @@ function relevance(symbol: GraphSymbol, { groups, identifiers }: MatchQuery) {
   value *= matched.length;
   if (symbol.kind === "interface" || symbol.kind === "type") value *= 0.65;
   const confidence = value;
-  if (exactMatch(symbol, identifiers)) {
+  const namePriority = nameMatch(symbol, identifiers, foldedIdentifiers);
+  const reasons: string[] = [];
+  if (namePriority) {
     // Exceed the maximum lexical score plus its bounded 20% graph boost.
     value += Math.max(20, 6 * groups.length ** 2);
+    reasons.push(namePriority >= 3 ? "Exact name" : "Name matched ignoring case");
   }
-  return { value, confidence, reason: `Matched: ${matched.slice(0, 5).join(", ")}` };
+  if (matched.length) reasons.push(`Matched: ${matched.slice(0, 5).join(", ")}`);
+  return { value, confidence, namePriority, reason: reasons.join("; ") };
 }
 function groupLocalEvidence(
   store: GraphStore,
@@ -55,9 +56,9 @@ function groupLocalEvidence(
   query: MatchQuery,
 ): void {
   const locals = [...candidates.values()].filter(
-    ({ symbol }) =>
+    ({ symbol, namePriority }) =>
       symbol.kind === "variable" &&
-      !exactMatch(symbol, query.identifiers) &&
+      !namePriority &&
       // Preserve potentially callable declarations rather than folding away closures.
       !/=>|->|\b(?:function|func|fn)\b|=\s*\{/.test(symbol.signature),
   );
@@ -93,6 +94,7 @@ function groupLocalEvidence(
       symbol,
       score: Math.max(previous?.score ?? 0, match.value),
       confidence: Math.max(previous?.confidence ?? 0, match.confidence),
+      namePriority: match.namePriority,
       reason: `${match.reason}; contains ${candidates.get(edge.target)?.symbol.qualifiedName} (${edge.evidence})`,
     });
   }
@@ -141,17 +143,12 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
   const activeGroups = groups
     .map((group) => group.filter((term) => terms.includes(term)))
     .filter((group) => group.length);
-  const identifiers = new Set(
-    (input.query.match(/[\p{L}\p{N}_$]+(?:(?:\.|::)[\p{L}\p{N}_$]+)*/gu) ?? [])
-      .filter(
-        (word) =>
-          word === input.query.trim() ||
-          /[._$]|::|[a-z][A-Z]/.test(word) ||
-          /^\p{Lu}.*\p{Ll}/u.test(word),
-      )
-      .map((word) => word.toLowerCase()),
-  );
-  const query = { groups: activeGroups, identifiers };
+  const identifiers = extractIdentifiers(input.query);
+  const query = {
+    groups: activeGroups,
+    identifiers: new Set(identifiers),
+    foldedIdentifiers: new Set(identifiers.map((name) => name.toLowerCase())),
+  };
   const scores = new Map<string, ReturnType<typeof relevance>>();
   const scored = (symbol: GraphSymbol) => {
     let result = scores.get(symbol.id);
@@ -162,17 +159,23 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
     return result;
   };
   const candidates = new Map<string, Candidate>();
-  for (const symbol of store.search(terms, scope, [...identifiers])) {
+  for (const symbol of store.search(terms, scope, identifiers)) {
     const match = scored(symbol);
     candidates.set(symbol.id, {
       symbol,
       score: match.value,
       confidence: match.confidence,
+      namePriority: match.namePriority,
       reason: match.reason,
     });
   }
   const seeds = [...candidates.values()]
-    .sort((a, b) => b.score - a.score || a.symbol.id.localeCompare(b.symbol.id))
+    .sort(
+      (a, b) =>
+        b.namePriority - a.namePriority ||
+        b.score - a.score ||
+        a.symbol.id.localeCompare(b.symbol.id),
+    )
     .slice(0, 8);
   const neighborhoods = seeds.map((seed) => ({ seed, edges: store.neighbors(seed.symbol.id, 16) }));
   const symbols = new Map([...candidates.values()].map(({ symbol }) => [symbol.id, symbol]));
@@ -203,6 +206,7 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
           symbol,
           score: direct + boost,
           confidence: match.confidence,
+          namePriority: match.namePriority,
           reason: `${direct ? `${match.reason}; ` : ""}${edge.kind} ${seed.symbol.qualifiedName} (${edge.evidence})`,
           edge,
         });
@@ -212,7 +216,7 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
     groupLocalEvidence(store, candidates, query);
   const selected: Candidate[] = [];
   const remaining = [...candidates.values()];
-  // Exact-name priority and graph boosts rank results, not their lexical confidence.
+  // Name matches rank independently from lexical confidence.
   const minimumConfidence = Math.max(
     1.4,
     ...remaining.map((candidate) => candidate.confidence * 0.12),
@@ -234,12 +238,13 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
     };
     remaining.sort(
       (a, b) =>
-        adjusted(b, b.score) - adjusted(a, a.score) || a.symbol.id.localeCompare(b.symbol.id),
+        b.namePriority - a.namePriority ||
+        adjusted(b, b.score) - adjusted(a, a.score) ||
+        a.symbol.id.localeCompare(b.symbol.id),
     );
     const next = remaining.shift();
     if (!next) break;
-    const threshold = exactMatch(next.symbol, identifiers) ? 1.4 : minimumConfidence;
-    if (adjusted(next, next.confidence) < threshold) continue;
+    if (!next.namePriority && adjusted(next, next.confidence) < minimumConfidence) continue;
     selected.push(next);
   }
   const ids = new Set(selected.map((candidate) => candidate.symbol.id));
