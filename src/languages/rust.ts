@@ -1,11 +1,16 @@
-import Parser from "tree-sitter";
-import Rust from "tree-sitter-rust";
 import { hashContent } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
+import {
+  createRustParser,
+  namedChildren,
+  type RustNode,
+  type RustParser,
+  type RustTree,
+} from "./rust-parser.js";
 import { linkRustProject } from "./rust-project.js";
 
-export type RustNode = Parser.SyntaxNode;
+export type { RustNode } from "./rust-parser.js";
 export interface RustEntry {
   node: RustNode;
   symbol: GraphSymbol;
@@ -68,18 +73,19 @@ function patternContains(node: Node | null, name: string): boolean {
   return (
     !!node &&
     ((node.type === "identifier" && node.text === name) ||
-      node.namedChildren.some((child) => patternContains(child, name)))
+      namedChildren(node).some((child) => patternContains(child, name)))
   );
 }
 function shadows(node: Node, scope: Node, name: string): boolean {
   const parameters = field(scope, "parameters");
   if (
-    parameters?.namedChildren.some((parameter) =>
+    parameters &&
+    namedChildren(parameters).some((parameter) =>
       patternContains(field(parameter, "pattern") ?? parameter, name),
     )
   )
     return true;
-  return scope.namedChildren.some(
+  return namedChildren(scope).some(
     (child) =>
       child.type === "let_declaration" &&
       child.startIndex < node.startIndex &&
@@ -145,8 +151,9 @@ function callTarget(call: Node, owner: RustEntry, entries: RustEntry[]): RustEnt
   }
   return candidates.length === 1 ? candidates[0] : undefined;
 }
-function fileGraph(parser: Parser, file: SourceFile): RustFileGraph {
+function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree: RustTree } {
   const tree = parser.parse(file.content);
+  if (!tree) throw new Error(`${file.path}: Rust parser did not produce a syntax tree`);
   const entries: RustEntry[] = [];
   const edges: GraphEdge[] = [];
   const modules: RustModuleDeclaration[] = [];
@@ -220,7 +227,7 @@ function fileGraph(parser: Parser, file: SourceFile): RustFileGraph {
         hash: hashContent(text),
         parentId: parent?.id,
         exported:
-          node.namedChildren.some((child) => child.type === "visibility_modifier") ||
+          namedChildren(node).some((child) => child.type === "visibility_modifier") ||
           parent?.kind === "trait" ||
           parent?.kind === "enum",
       };
@@ -235,7 +242,7 @@ function fileGraph(parser: Parser, file: SourceFile): RustFileGraph {
         prefix = qualifiedName;
       entries.push({ node, symbol: owner, implementation: currentImpl, modulePath });
     }
-    for (const child of node.namedChildren)
+    for (const child of namedChildren(node))
       visit(child, owner, prefix, currentImpl, childModulePath);
   }
   visit(tree.rootNode);
@@ -276,7 +283,7 @@ function fileGraph(parser: Parser, file: SourceFile): RustFileGraph {
             line: node.startPosition.row + 1,
           });
       }
-      for (const child of node.namedChildren) calls(child);
+      for (const child of namedChildren(node)) calls(child);
     }
     calls(entry.node);
   }
@@ -291,15 +298,13 @@ function fileGraph(parser: Parser, file: SourceFile): RustFileGraph {
       ).values(),
     ],
     warnings,
+    tree,
   };
 }
 export class RustGraph {
-  private parser = new Parser();
-  private cache = new Map<string, { hash: string; graph: RustFileGraph }>();
-  constructor() {
-    this.parser.setLanguage(Rust as Parser.Language);
-  }
-  build(files: SourceFile[]): RustFileGraph {
+  private parser?: RustParser;
+  private cache = new Map<string, { hash: string; graph: ReturnType<typeof fileGraph> }>();
+  async build(files: SourceFile[]): Promise<RustFileGraph> {
     const result: RustFileGraph = {
       symbols: [],
       edges: [],
@@ -309,12 +314,22 @@ export class RustGraph {
       uses: [],
     };
     const current = new Set(files.map((file) => file.path));
-    for (const path of this.cache.keys()) if (!current.has(path)) this.cache.delete(path);
+    for (const [path, cached] of this.cache) {
+      if (!current.has(path)) {
+        cached.graph.tree.delete();
+        this.cache.delete(path);
+      }
+    }
+    if (!files.length) return result;
+    this.parser ??= await createRustParser();
+    const parser = this.parser;
     const graphs = new Map<string, RustFileGraph>();
     for (const file of files) {
       let cached = this.cache.get(file.path);
       if (cached?.hash !== file.hash) {
-        cached = { hash: file.hash, graph: fileGraph(this.parser, file) };
+        const graph = fileGraph(parser, file);
+        cached?.graph.tree.delete();
+        cached = { hash: file.hash, graph };
         this.cache.set(file.path, cached);
       }
       graphs.set(file.path, cached.graph);
@@ -345,5 +360,11 @@ export class RustGraph {
       ).values(),
     ];
     return result;
+  }
+  close(): void {
+    for (const cached of this.cache.values()) cached.graph.tree.delete();
+    this.cache.clear();
+    this.parser?.delete();
+    this.parser = undefined;
   }
 }

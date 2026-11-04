@@ -64,7 +64,7 @@ export class GraphEngine {
     attempt = 0,
   ): Promise<GraphStatus> {
     cancellation?.throwIfAborted();
-    const configHash = `frameworks-v2:rust-v2:${languageConfiguration(this.root).hash}`;
+    const configHash = `frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}`;
     const head = repositoryHead(this.root);
     const now = Date.now();
     if (
@@ -91,7 +91,7 @@ export class GraphEngine {
       if (
         scan.isCurrent() &&
         repositoryHead(this.root) === head &&
-        `frameworks-v2:rust-v2:${languageConfiguration(this.root).hash}` === configHash
+        `frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}` === configHash
       )
         return;
       if (attempt >= 2) throw new Error("Sources changed while indexing; retry the graph query.");
@@ -118,7 +118,9 @@ export class GraphEngine {
       );
       // Synchronous compilers cannot be preempted; cancellation is checked between phases.
       cancellation?.throwIfAborted();
-      const rust = this.rustParser.build(scan.files.filter((file) => /\.rs$/i.test(file.path)));
+      const rust = await this.rustParser.build(
+        scan.files.filter((file) => /\.rs$/i.test(file.path)),
+      );
       graph.symbols.push(...rust.symbols);
       graph.edges.push(...rust.edges);
       graph.warnings.push(...rust.warnings);
@@ -208,6 +210,7 @@ export class GraphEngine {
     };
   }
   close(): void {
+    this.rustParser.close();
     this.store.close();
   }
 

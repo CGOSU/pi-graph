@@ -20,6 +20,16 @@ pi install D:/Code/Javascript/pi-graph
 pi -e D:/Code/Javascript/pi-graph
 ```
 
+### Android / Termux
+
+Rust 解析使用随包提供的 WebAssembly Tree-sitter runtime 和 Rust grammar，不需要 Android 原生 addon、node-gyp、Python/C++ 工具链或联网编译。Termux 环境仍须提供 Node.js >= 22.19、`node:sqlite`，并能运行 pi；确认 Node 版本后按通常方式安装/更新扩展，再重启 pi：
+
+```sh
+node --version
+```
+
+Android 真机与不同 Termux/Node 发行版尚未验证；如果 pi 宿主本身无法在该设备运行，仅替换解析器不能解决宿主兼容问题。符合要求且可运行 pi 的 Termux 环境可按 pi 当前 package source 格式安装或更新 Git 扩展，并重启 pi。
+
 本地源码变更后执行 `npm run build`，然后重新加载 pi。Git 安装会通过 `prepare` 构建；npm 发布包包含已构建文件，不要求用户构建。
 
 包只声明根目录 `index.ts` 为扩展入口。内部模块不会独立加载，扩展列表显示 `pi-graph`；从 Git 安装时显示来源仓库名，不附加 `:src`。测试直接调用 pi 的资源加载器和展示逻辑，并在隔离配置目录执行实际 `pi install`，不会修改用户已有安装。
@@ -55,7 +65,7 @@ Agent 工具：
 - Vue 模板支持静态可解析的 `v-for`/`v-slot` 绑定模式，包括解构与默认值；局部别名只在对应子树遮蔽同名外部绑定，循环源、默认值表达式及无关兄弟节点仍可解析。无法静态解析或有歧义的作用域会产生 warning，并跳过受影响的局部子树；不猜测动态键、展开或非静态返回中的绑定。模板表达式区分大小写；仅组件标签支持唯一匹配的 kebab-case 名称映射。
 - Vue 不编译样式、不执行宏，也不完整模拟 Options API 实例类型。外置 `src`、预处理模板和非 JS/TS 脚本会报告 warning；无法解析的模板表达式及不支持的局部作用域/选项形态也会报告 warning，不会将其伪装为已解析。
 - Rust 使用 Tree-sitter 提取函数、方法、struct、enum/variant、trait、模块、类型别名、字段、常量、静态变量和宏定义。包含关系及可辨识调用统一标注为 `syntax`，显式类型注解关联仅表示语法层关联，不是编译器类型解析或推断。基于已扫描文件支持 inline module、常规模块声明到唯一 `foo.rs`/`foo/mod.rs` 的映射、`lib.rs`/`main.rs` 等 crate root、嵌套模块，以及 `crate`/`self`/`super` 路径；支持模块作用域内简单、别名、分组/嵌套 use 和明确限定路径。函数/方法参数或 `let` 显式标注为唯一本地 struct/enum 类型时，可关联 inherent impl 方法及明确类型路径调用；普通引用、已支持 use 别名和 `self`/`Self` 也受限支持。歧义、缺失模块上下文或多个 crate root 共用模块文件时不猜测目标；不推断构造/返回/任意表达式类型，不支持 glob、pub use 重导出链、`extern crate`、`#[path]`、`cfg` 选择、宏生成、跨 crate/workspace、trait/泛型分派、类型别名展开、智能指针/Deref 或强制转换。无需安装 Rust 工具链。旧 Rust 解析配置版本的持久化索引会在刷新时重建，即使 Rust 源文件未变化。
-- Tree-sitter 为原生依赖，支持的平台优先使用预编译包；无预编译包时安装需要 node-gyp 对应的 Python/C++ 构建环境。默认忽略 Rust 的 `target/` 构建目录。
+- Rust parser runtime 与 grammar 以 WebAssembly 资源随 `@vscode/tree-sitter-wasm` 包提供；不需要 Rust 工具链、平台原生 `.node` addon 或 node-gyp。默认忽略 Rust 的 `target/` 构建目录。旧原生 Rust 索引配置会在刷新时重建。
 - SQLite + FTS5 持久化；默认缓存目录为项目下 `.pi-graph/`，建议加入目标项目的 `.gitignore`。
 - 词法召回、camelCase 切分、中文双字切分及少量中英功能词映射；检索候选结合词组与标识符相关性排序，再做一跳局部图扩展、去重和预算裁剪。
 - 查询前校验快照。递归监听健康时，核对已访问目录、源文件及存在/缺失的 ignore 文件的 inode、大小、mtime/ctime 和权限，并检查 Git HEAD/ref、继承配置内容及数据库 revision；全部未变才复用内存源码，避免每次定位/检查都重读全仓内容。删除、重命名、新增目录、忽略规则或配置变化即使监听事件尚未送达，也会触发重新扫描。扫描及编译后再次核验；连续变化最多尝试三次，失败时保留上个快照并要求重试。

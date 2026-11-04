@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import type { GraphEdge, SourceFile } from "../core/types.js";
 import type { RustEntry, RustFileGraph, RustNode } from "./rust.js";
+import { namedChildren } from "./rust-parser.js";
 
 interface ParsedFile {
   source: SourceFile;
@@ -154,7 +155,7 @@ function expandUse(node: RustNode, prefix: string[] = []): ImportSpec[] {
     return path && list ? expandUse(list, [...prefix, ...pathParts(path.text)]) : [];
   }
   if (node.type === "use_list")
-    return node.namedChildren.flatMap((child) => expandUse(child, prefix));
+    return namedChildren(node).flatMap((child) => expandUse(child, prefix));
   if (node.type === "use_as_clause") {
     const path = field(node, "path");
     const alias = field(node, "alias");
@@ -180,7 +181,7 @@ function moduleImports(
     const parsedFile = parsed.get(filePath);
     if (!parsedFile) continue;
     for (const declaration of parsedFile.graph.uses) {
-      if (declaration.node.namedChildren.some((child) => child.type === "visibility_modifier"))
+      if (namedChildren(declaration.node).some((child) => child.type === "visibility_modifier"))
         continue;
       const scope = key([...modulePath, ...declaration.modulePath]);
       if (context.modules.get(scope) === null || !context.modules.has(scope)) continue;
@@ -205,11 +206,11 @@ function genericTypeNames(node: RustNode | undefined): Set<string> {
   if (!parameters) return result;
   function visit(current: RustNode): void {
     if (current.type === "type_parameter") {
-      const name = field(current, "name") ?? current.namedChildren[0];
+      const name = field(current, "name") ?? namedChildren(current)[0];
       if (name) result.add(name.text);
       return;
     }
-    for (const child of current.namedChildren) visit(child);
+    for (const child of namedChildren(current)) visit(child);
   }
   visit(parameters);
   return result;
@@ -237,7 +238,7 @@ function bindingName(pattern: RustNode | null): string | undefined {
   if (!pattern) return undefined;
   if (pattern.type === "identifier") return pattern.text;
   if (["mutable_pattern", "mut_pattern", "ref_pattern", "captured_pattern"].includes(pattern.type))
-    return bindingName(pattern.namedChildren[0] ?? null);
+    return bindingName(namedChildren(pattern)[0] ?? null);
   return undefined;
 }
 function patternNames(pattern: RustNode | null): string[] {
@@ -248,7 +249,7 @@ function patternNames(pattern: RustNode | null): string[] {
       names.push(node.text);
       return;
     }
-    if (node.type.endsWith("_pattern")) for (const child of node.namedChildren) visit(child);
+    if (node.type.endsWith("_pattern")) for (const child of namedChildren(node)) visit(child);
   }
   visit(pattern);
   return [...new Set(names)];
@@ -290,7 +291,7 @@ function bindingsFor(functionNode: RustNode): TypedBinding[] {
   }
   const parameters = field(functionNode, "parameters");
   if (parameters) {
-    for (const parameter of parameters.namedChildren) {
+    for (const parameter of namedChildren(parameters)) {
       if (parameter.type === "parameter")
         addPattern(field(parameter, "pattern"), field(parameter, "type"), body, body.startIndex);
     }
@@ -300,7 +301,7 @@ function bindingsFor(functionNode: RustNode): TypedBinding[] {
     if (node.type === "closure_expression" && node.id !== functionNode.id) {
       const closureBody = field(node, "body") ?? node;
       const closureParameters = field(node, "parameters");
-      for (const parameter of closureParameters?.namedChildren ?? [])
+      for (const parameter of closureParameters ? namedChildren(closureParameters) : [])
         addPattern(
           parameter.type === "parameter" ? field(parameter, "pattern") : parameter,
           null,
@@ -326,7 +327,7 @@ function bindingsFor(functionNode: RustNode): TypedBinding[] {
             : null;
       if (scope) addPattern(field(node, "pattern"), null, scope, scope.startIndex);
     }
-    for (const child of node.namedChildren) visit(child);
+    for (const child of namedChildren(node)) visit(child);
   }
   visit(functionNode);
   return result;
@@ -437,7 +438,7 @@ function callNodes(entry: RustEntry): RustNode[] {
   function visit(node: RustNode): void {
     if (node.id !== entry.node.id && boundaries.has(node.type)) return;
     if (node.type === "call_expression") result.push(node);
-    for (const child of node.namedChildren) visit(child);
+    for (const child of namedChildren(node)) visit(child);
   }
   visit(entry.node);
   return result;

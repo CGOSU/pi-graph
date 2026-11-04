@@ -8,6 +8,12 @@
 
 ## 已确认决策
 
+### 2026-11-04 — Rust parser 使用随包提供的 WebAssembly runtime
+
+- 以 `@vscode/tree-sitter-wasm` 提供的 runtime 与 Rust grammar 替代 `tree-sitter`/`tree-sitter-rust` 原生 addon，避免在 Android/Termux 上因无 Android 预编译 addon 而进入 node-gyp 本地构建；运行时从安装包加载 WASM，不下载 grammar，不静默跳过 Rust。
+- 保留既有 Rust 符号与关系解析契约；异步初始化 parser，缓存解析树并在替换、删除或 engine 关闭时释放。解析配置版本更新，使既有 Rust 图在刷新时重建。
+- 验证了 darwin/arm64 Node 上的生产依赖安装模拟（npm 设置 `--os=android --cpu=arm64`）、包内无 `.node` addon、实际 WASM Rust 检索、缺失 grammar 的错误及恢复、worker、完整 67 项回归与 typecheck。该安装模拟没有在 Android 执行 Node，Android/Termux 和 Pi 宿主兼容性仍待真机验证。
+
 ### 2026-11-04 — 先验证新鲜度再复用快照
 
 - 复用仅用于递归监听健康的 worker，查询仍执行轻量文件身份核验和配置/Git/revision 核验；监听事件是失效提示，不是唯一的新鲜度证据。保持无监听模式逐次内容扫描及显式 rebuild 的强制语义。具体检查与兜底窗口见 [README](../README.md#实现边界)。
@@ -44,4 +50,4 @@
 
 - 扩展现有扫描、存储和检索链路，使用 `tree-sitter` + `tree-sitter-rust`，无需调用 Cargo 或执行目标项目代码。
 - Rust 保留独立 symbol kind；同文件调用只在语法可辨识且目标唯一时连边，证据标注 `syntax`。不猜测跨文件导入、任意接收者类型或宏展开。
-- 同文件图按内容哈希复用；版本化解析配置触发旧索引刷新。原生依赖采用包自带预编译二进制，缺失时需要 node-gyp 环境。
+- 同文件图按内容哈希复用；版本化解析配置触发旧索引刷新。原生依赖采用包自带预编译二进制，缺失时需要 node-gyp 环境。此安装策略已被 2026-11-04 的 WASM 决策替代。

@@ -8,6 +8,12 @@
 
 ## 会话
 
+### 2026-11-04 — Android 安装兼容性：Rust parser 改为 WASM
+
+- 移除 `tree-sitter` 与 `tree-sitter-rust` 原生依赖，改由随 `@vscode/tree-sitter-wasm` 包发布的 runtime 与 Rust grammar 初始化 parser。Rust 图配置 hash 升级，旧索引在下次刷新时重建；worker 关闭时释放 WASM parser 与解析树。使用测试检查生产安装依赖中不包含 `.node` addon，并覆盖 grammar 加载失败与恢复。
+- 验证：`npm run build`；Rust/production/refresh/persistence 相关测试 22/22；`npm run typecheck`；`npm test` 67/67；改动文件的 Biome 检查（无 error，保留 `src/languages/rust-project.ts:388` 的非空断言 warning）；`git diff --check`。生产安装测试设置 `--os=android --cpu=arm64`，但测试进程实际运行在 darwin/arm64 Node v26.11.1。
+- 遗留：没有 Android/Termux 真机验证，亦未验证 Pi 宿主在 Android 可运行。设备上仍需 Node.js >=22.19、`node:sqlite` 及可运行的 pi 宿主。
+
 ### 2026-11-04 — 监听刷新与持久化诊断
 
 - 修复扫描/监听排除不一致、重复排队和无变化查询重复读取源码；增加快照核验、监听失效兜底及扫描中变化的有界重试。覆盖 warnings 随事务保存与恢复，旧索引补建，纯诊断变化也推进 revision。实现边界统一见 [README](../README.md#实现边界)。

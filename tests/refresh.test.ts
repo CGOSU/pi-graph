@@ -110,8 +110,8 @@ test("edits during compilation are reconciled before publishing source positions
     t.mock.method(
       RustGraph.prototype,
       "build",
-      function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
-        const result = build.apply(this, args);
+      async function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
+        const result = await build.apply(this, args);
         if (!changed) {
           changed = true;
           writeFileSync(join(f.root, "lib.rs"), "pub fn value() -> i32 { 200 }");
@@ -137,8 +137,8 @@ test("continuous edits fail bounded reconciliation without replacing the last sn
     t.mock.method(
       RustGraph.prototype,
       "build",
-      function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
-        const result = build.apply(this, args);
+      async function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
+        const result = await build.apply(this, args);
         writeFileSync(join(f.root, "lib.rs"), `pub fn value() -> i32 { ${changes++} }`);
         return result;
       },

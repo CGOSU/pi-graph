@@ -98,7 +98,7 @@ test("legacy warning metadata is rebuilt once and failed commits retain the old 
   }
 });
 
-test("refresh rebuilds a persisted Rust v1 index after Rust parser configuration changes", async () => {
+test("refresh rebuilds a persisted native Rust index after migrating to WASM", async () => {
   const f = await fixture({
     "src/lib.rs": "mod caller; mod target;",
     "src/caller.rs": "use crate::target::work; pub fn invoke() { work(); }",
@@ -106,7 +106,9 @@ test("refresh rebuilds a persisted Rust v1 index after Rust parser configuration
   });
   try {
     const files = await scanSources(f.root);
-    const rust = new RustGraph().build(files.files.filter((file) => /\.rs$/i.test(file.path)));
+    const parser = new RustGraph();
+    const rust = await parser.build(files.files.filter((file) => /\.rs$/i.test(file.path)));
+    parser.close();
     const invoke = rust.symbols.find((symbol) => symbol.name === "invoke");
     assert(invoke);
 
@@ -116,7 +118,7 @@ test("refresh rebuilds a persisted Rust v1 index after Rust parser configuration
         files.files,
         rust.symbols,
         rust.edges.filter((edge) => edge.source !== invoke.id || edge.kind !== "calls"),
-        `frameworks-v2:rust-v1:${languageConfiguration(f.root).hash}`,
+        `frameworks-v2:rust-v2:${languageConfiguration(f.root).hash}`,
       );
     } finally {
       legacy.close();
