@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Incremental symbol graph for focused agent code navigation",
   "type": "module",
+  "packageManager": "pnpm@12.14.0",
   "license": "MIT",
   "keywords": [
     "pi-package",
@@ -27,13 +28,13 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "npm run build && tsc --noEmit",
-    "test": "npm run build && node --test dist/tests/*.test.js",
+    "typecheck": "pnpm run build && tsc --noEmit",
+    "test": "pnpm run build && node --test dist/tests/*.test.js",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "check": "npm run typecheck && npm run lint && npm test",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm test",
     "prepare": "node scripts/prepare.mjs",
-    "benchmark": "npm run build && node dist/scripts/benchmark.js"
+    "benchmark": "pnpm run build && node dist/scripts/benchmark.js"
   },
   "dependencies": {
     "@astrojs/compiler": "^4.0.0",

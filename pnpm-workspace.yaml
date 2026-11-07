@@ -1,0 +1,6 @@
+# Host-provided peers must not be installed in production-only plugin builds.
+autoInstallPeers: false
+# These development-only transitive dependencies do not need install hooks.
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false

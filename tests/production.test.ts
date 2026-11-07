@@ -26,36 +26,30 @@ test("production-only Git-style installation builds without host, dev, or native
       "scripts",
       "grammars",
       "package.json",
-      "package-lock.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
       "index.ts",
       "tsconfig.json",
       "tsconfig.build.json",
     ])
       await cp(join(packageRoot, path), join(destination, path), { recursive: true });
     await promisify(execFile)(
-      process.execPath,
-      [
-        process.env.npm_execpath ?? "",
-        "install",
-        "--omit=dev",
-        "--legacy-peer-deps",
-        "--offline",
-        "--no-audit",
-        "--no-fund",
-        "--os=android",
-        "--cpu=arm64",
-      ],
+      process.env.npm_execpath ?? "pnpm",
+      ["install", "--prod", "--frozen-lockfile", "--offline", "--os=android", "--cpu=arm64"],
       { cwd: destination, timeout: 60_000 },
     );
+    // pnpm skips prepare for --prod installs; Git-style source installs build explicitly.
+    await promisify(execFile)(process.env.npm_execpath ?? "pnpm", ["run", "prepare"], {
+      cwd: destination,
+      timeout: 60_000,
+    });
     const packed = await promisify(execFile)(
-      process.execPath,
-      [process.env.npm_execpath ?? "", "pack", "--dry-run", "--json", "--ignore-scripts"],
+      process.env.npm_execpath ?? "pnpm",
+      ["pack", "--dry-run", "--json", "--ignore-scripts"],
       { cwd: destination, timeout: 60_000 },
     );
-    type Package = { files: { path: string }[] };
-    const raw: Package[] | Record<string, Package> = JSON.parse(packed.stdout);
-    const packages = Array.isArray(raw) ? raw : Object.values(raw);
-    const paths = packages[0]?.files.map((file) => file.path) ?? [];
+    const packedPackage: { files: { path: string }[] } = JSON.parse(packed.stdout);
+    const paths = packedPackage.files.map((file) => file.path);
     for (const path of [
       "grammars/dart.wasm",
       "grammars/kotlin.wasm",

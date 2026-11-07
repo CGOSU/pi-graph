@@ -9,8 +9,8 @@
 本地开发安装：
 
 ```sh
-npm install --legacy-peer-deps
-npm run check
+pnpm install --frozen-lockfile
+pnpm check
 pi install D:/Code/Javascript/pi-graph
 ```
 
@@ -30,7 +30,7 @@ node --version
 
 Android 真机与不同 Termux/Node 发行版尚未验证；如果 pi 宿主本身无法在该设备运行，仅替换解析器不能解决宿主兼容问题。符合要求且可运行 pi 的 Termux 环境可按 pi 当前 package source 格式安装或更新 Git 扩展，并重启 pi。
 
-本地源码变更后执行 `npm run build`，然后重新加载 pi。Git 安装会通过 `prepare` 构建；npm 发布包包含已构建文件，不要求用户构建。
+本地源码变更后执行 `pnpm build`，然后重新加载 pi。Git 安装会通过 `prepare` 构建；若以 production-only 模式安装源码，pnpm 会跳过 `prepare`，需另行执行 `pnpm run prepare`。npm 发布包包含已构建文件，不要求用户构建。
 
 包只声明根目录 `index.ts` 为扩展入口。内部模块不会独立加载，扩展列表显示 `pi-graph`；从 Git 安装时显示来源仓库名，不附加 `:src`。测试直接调用 pi 的资源加载器和展示逻辑，并在隔离配置目录执行实际 `pi install`，不会修改用户已有安装。
 
@@ -112,15 +112,15 @@ tests/                   # 定位、增量、配置、worker、安装与展示�
 ## 验证与打包
 
 ```sh
-npm run check
-npm run benchmark
-npm pack --dry-run
+pnpm check
+pnpm benchmark
+pnpm pack --dry-run
 ```
 
 回归覆盖中文功能定位、当前行号、修改/删除/重命名、忽略与 scope、SQL 特殊字符、别名/方法关系、配置继承变更、worker 并发与取消，以及 pi 安装后的单入口展示。
 
 合成性能测量（2026-10-26，Apple M6、darwin/arm64、Node v26.11.1；每次 50,103 行、170 个文件、5,015 个 symbol，连续 3 次）：冷索引中位数 1,246 ms，热查询中位数 2 ms、P95 中位数 4 ms，单文件更新中位数 244 ms。与同机同口径的优化前对照相比，冷索引中位数为 1,252→1,246 ms，热查询中位数为 4→2 ms、P95 为 8→4 ms，单文件更新中位数为 231→244 ms。只观察到该合成场景的热查询改善；冷索引差异不足以证明稳定加速，单文件更新未变快，且变化时仍会重新提取全项目 symbol 并重建关系。独立 SQLite 提交样本也未证明稳定显著加速。
 
-冻结同一输入图的 7 个定位场景中，首位目标命中由 3/7 提至 7/7；模型可见正文从 11,904 降至 10,979 字符（12,036→11,101 UTF-8 字节），结构化结果从 20,122 降至 17,440 字符。3 个有匹配项的展示对照样例正文长度下降 4%–20.3%。这些是固定样例的排序和序列化长度，不代表一般项目定位准确率；字符数与 UTF-8 字节数不是计费 token，也未测量真实代理任务的 token 或费用。可通过 `npm run benchmark -- 50000` 调整基准规模，结果会随运行环境变化。
+冻结同一输入图的 7 个定位场景中，首位目标命中由 3/7 提至 7/7；模型可见正文从 11,904 降至 10,979 字符（12,036→11,101 UTF-8 字节），结构化结果从 20,122 降至 17,440 字符。3 个有匹配项的展示对照样例正文长度下降 4%–20.3%。这些是固定样例的排序和序列化长度，不代表一般项目定位准确率；字符数与 UTF-8 字节数不是计费 token，也未测量真实代理任务的 token 或费用。可通过 `pnpm run benchmark -- 50000` 调整基准规模，结果会随运行环境变化。
 
 Node 的 `node:sqlite` 在部分支持版本上会输出实验性 API 警告，不影响功能。
