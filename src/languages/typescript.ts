@@ -3,6 +3,7 @@ import ts from "typescript";
 import { hashContent, normalizePath } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
+import { astroTemplateEdges, prepareAstro } from "./astro.js";
 import { analyzeVueOptions, prepareVue, vueTemplateEdges } from "./vue.js";
 
 interface Declaration {
@@ -142,11 +143,19 @@ export class TypeScriptGraph {
   ): { symbols: GraphSymbol[]; edges: GraphEdge[]; warnings: string[] } {
     const { options, warnings } = languageConfiguration(root);
     const vueSources = files.filter((file) => /\.vue$/i.test(file.path)).map(prepareVue);
-    warnings.push(...vueSources.flatMap((vue) => vue.warnings));
+    const astroSources = files.filter((file) => /\.astro$/i.test(file.path)).map(prepareAstro);
+    warnings.push(
+      ...vueSources.flatMap((vue) => vue.warnings),
+      ...astroSources.flatMap((astro) => astro.warnings),
+    );
     const prepared = [
-      ...files.filter((file) => !/\.vue$/i.test(file.path)),
+      ...files.filter((file) => !/\.(vue|astro)$/i.test(file.path)),
       ...vueSources.map((vue) => vue.input),
+      ...astroSources.map((astro) => astro.input),
     ];
+    const astroByPath = new Map(
+      astroSources.map((astro) => [resolve(astro.input.absolutePath), astro]),
+    );
     const inputs = new Map(prepared.map((file) => [resolve(file.absolutePath), file]));
     const vueByPath = new Map(vueSources.map((vue) => [resolve(vue.input.absolutePath), vue]));
     const host = ts.createCompilerHost(options, true);
@@ -178,6 +187,7 @@ export class TypeScriptGraph {
     const symbols: GraphSymbol[] = vueSources.flatMap((vue) =>
       vue.template ? [vue.component, vue.template] : [vue.component],
     );
+    symbols.push(...astroSources.flatMap((astro) => [astro.component, astro.template]));
     const edges: GraphEdge[] = [];
     const byNode = new Map<ts.Node, GraphSymbol>();
     const vueMembersByPath = new Map<string, ReturnType<typeof analyzeVueOptions>>();
@@ -197,16 +207,17 @@ export class TypeScriptGraph {
         inputs.get(resolve(source.fileName))?.path ??
         normalizePath(relative(root, source.fileName));
       const vue = vueByPath.get(resolve(source.fileName));
-      if (vue) {
+      const componentSource = vue ?? astroByPath.get(resolve(source.fileName));
+      if (componentSource) {
         for (const statement of source.statements)
-          if (ts.isExportAssignment(statement)) byNode.set(statement, vue.component);
-        if (vue.template)
+          if (ts.isExportAssignment(statement)) byNode.set(statement, componentSource.component);
+        if (componentSource.template)
           edges.push({
-            source: vue.component.id,
-            target: vue.template.id,
+            source: componentSource.component.id,
+            target: componentSource.template.id,
             kind: "contains",
             evidence: "syntax",
-            line: vue.template.startLine,
+            line: componentSource.template.startLine,
           });
       }
       function visit(node: ts.Node, parent?: GraphSymbol): void {
@@ -255,7 +266,7 @@ export class TypeScriptGraph {
               [info.name, qualifiedName, signature, comment, path, ownText(node)].join(" "),
             ),
             hash: hashContent(text),
-            parentId: parent?.id ?? vue?.component.id,
+            parentId: parent?.id ?? componentSource?.component.id,
             exported: isExported(node),
           };
           symbols.push(owner);
@@ -348,6 +359,18 @@ export class TypeScriptGraph {
       return symbol;
     }
     for (const source of roots) {
+      const astro = astroByPath.get(resolve(source.fileName));
+      if (astro) {
+        const bindings = new Map<string, GraphSymbol>();
+        for (const binding of checker.getSymbolsInScope(
+          source,
+          ts.SymbolFlags.Value | ts.SymbolFlags.Alias,
+        )) {
+          const target = resolveSymbol(binding);
+          if (target) bindings.set(binding.name, target);
+        }
+        edges.push(...astroTemplateEdges(astro, (name) => bindings.get(name)));
+      }
       const vue = vueByPath.get(resolve(source.fileName));
       if (vue) {
         const bindingCandidates = new Map<string, Map<string, GraphSymbol>>();

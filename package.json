@@ -36,6 +36,7 @@
     "benchmark": "npm run build && node dist/scripts/benchmark.js"
   },
   "dependencies": {
+    "@astrojs/compiler": "^4.0.0",
     "@vscode/tree-sitter-wasm": "^0.3.1",
     "@vue/compiler-dom": "^3.5.44",
     "@vue/compiler-sfc": "^3.5.44",

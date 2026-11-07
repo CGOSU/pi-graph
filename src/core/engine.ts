@@ -66,7 +66,7 @@ export class GraphEngine {
     attempt = 0,
   ): Promise<GraphStatus> {
     cancellation?.throwIfAborted();
-    const configHash = `syntax-v2:frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}`;
+    const configHash = `syntax-v2:frameworks-v3:rust-wasm-v1:${languageConfiguration(this.root).hash}`;
     const head = repositoryHead(this.root);
     const now = Date.now();
     if (
@@ -93,7 +93,7 @@ export class GraphEngine {
       if (
         scan.isCurrent() &&
         repositoryHead(this.root) === head &&
-        `syntax-v2:frameworks-v2:rust-wasm-v1:${languageConfiguration(this.root).hash}` ===
+        `syntax-v2:frameworks-v3:rust-wasm-v1:${languageConfiguration(this.root).hash}` ===
           configHash
       )
         return;

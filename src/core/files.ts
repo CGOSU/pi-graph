@@ -18,7 +18,7 @@ const excluded = new Set([
   ".cache",
   "target",
 ]);
-const sourcePattern = /\.(?:[cm]?[jt]sx?|rs|vue|dart|go|kts?)$/i;
+const sourcePattern = /\.(?:[cm]?[jt]sx?|rs|vue|astro|dart|go|kts?)$/i;
 function isSourcePath(path: string): boolean {
   return sourcePattern.test(path) && !/\.d\.[cm]?ts$/i.test(path);
 }
