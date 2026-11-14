@@ -5,8 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { GraphEngine } from "../src/core/engine.js";
 import { hashContent } from "../src/core/files.js";
-import type { InspectResult } from "../src/core/types.js";
-import { languageConfiguration } from "../src/languages/typescript.js";
+import type { InspectResult, SourceFile } from "../src/core/types.js";
+import { languageConfiguration, TypeScriptGraph } from "../src/languages/typescript.js";
 import { fixture } from "./helpers.js";
 
 function references(detail: InspectResult) {
@@ -164,6 +164,73 @@ const outside = "updated outside";
       (await templateDetail(f.engine, "ExistingChild.vue")).symbol.path,
       "ExistingChild.vue",
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("GraphEngine forwards pre-parsed LanguageConfiguration and TypeScriptGraph preserves Vue incremental parity", async (t) => {
+  const vueContent = `<script setup lang="ts">
+import { helper } from "./helper";
+const count = helper();
+</script>
+<template><p>{{ count }}</p></template>`;
+  const helperV1 = "export function helper() { return 1; }\n";
+  const helperV2 = "export function helper() { return 2; }\n";
+  const f = await fixture({
+    "Panel.vue": vueContent,
+    "helper.ts": helperV1,
+  });
+  try {
+    const receivedConfigs: unknown[] = [];
+    const build = TypeScriptGraph.prototype.build;
+    const mock = t.mock.method(
+      TypeScriptGraph.prototype,
+      "build",
+      function (this: TypeScriptGraph, ...args: Parameters<TypeScriptGraph["build"]>) {
+        receivedConfigs.push(args[2]);
+        return build.apply(this, args);
+      },
+    );
+    try {
+      await f.engine.refresh();
+    } finally {
+      mock.mock.restore();
+    }
+    assert.equal(receivedConfigs.length, 1);
+    const forwarded = receivedConfigs[0] as ReturnType<typeof languageConfiguration> | undefined;
+    assert.equal(forwarded?.hash, languageConfiguration(f.root).hash);
+
+    const makeFile = (path: string, content: string): SourceFile => ({
+      path,
+      absolutePath: join(f.root, path),
+      content,
+      hash: hashContent(content),
+    });
+    const incremental = new TypeScriptGraph();
+    const first = incremental.build(
+      f.root,
+      [makeFile("Panel.vue", vueContent), makeFile("helper.ts", helperV1)],
+      forwarded,
+    );
+    const second = incremental.build(
+      f.root,
+      [makeFile("Panel.vue", vueContent), makeFile("helper.ts", helperV2)],
+      forwarded,
+    );
+    const fresh = new TypeScriptGraph().build(f.root, [
+      makeFile("Panel.vue", vueContent),
+      makeFile("helper.ts", helperV2),
+    ]);
+    assert.deepEqual(
+      second.symbols.map((symbol) => symbol.id).sort(),
+      fresh.symbols.map((symbol) => symbol.id).sort(),
+    );
+    assert.deepEqual(
+      second.edges.map((edge) => `${edge.source}->${edge.target}:${edge.kind}`).sort(),
+      fresh.edges.map((edge) => `${edge.source}->${edge.target}:${edge.kind}`).sort(),
+    );
+    assert(first.edges.some((edge) => edge.kind === "references"));
   } finally {
     await f.cleanup();
   }

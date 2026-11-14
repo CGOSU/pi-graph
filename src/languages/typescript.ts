@@ -1,10 +1,10 @@
-import { relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import ts from "typescript";
-import { hashContent, normalizePath } from "../core/files.js";
+import { hashContent } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
 import { astroTemplateEdges, prepareAstro } from "./astro.js";
-import { analyzeVueOptions, prepareVue, vueTemplateEdges } from "./vue.js";
+import { analyzeVueOptions, prepareVue, type VueSource, vueTemplateEdges } from "./vue.js";
 
 interface Declaration {
   node: ts.Node;
@@ -81,7 +81,7 @@ function isExported(node: ts.Node): boolean {
       false)
   );
 }
-interface LanguageConfiguration {
+export interface LanguageConfiguration {
   options: ts.CompilerOptions;
   hash: string;
   warnings: string[];
@@ -137,12 +137,25 @@ export function languageConfiguration(root: string): LanguageConfiguration {
 export class TypeScriptGraph {
   private program?: ts.Program;
   private cache = new Map<string, { hash: string; source: ts.SourceFile }>();
+  private vueCache = new Map<string, { hash: string; prepared: VueSource }>();
   build(
     root: string,
     files: SourceFile[],
+    configuration?: LanguageConfiguration,
   ): { symbols: GraphSymbol[]; edges: GraphEdge[]; warnings: string[] } {
-    const { options, warnings } = languageConfiguration(root);
-    const vueSources = files.filter((file) => /\.vue$/i.test(file.path)).map(prepareVue);
+    const resolved = configuration ?? languageConfiguration(root);
+    const options = resolved.options;
+    const warnings = [...resolved.warnings];
+    const vueFiles = files.filter((file) => /\.vue$/i.test(file.path));
+    const activeVue = new Set(vueFiles.map((file) => file.path));
+    for (const path of this.vueCache.keys()) if (!activeVue.has(path)) this.vueCache.delete(path);
+    const vueSources = vueFiles.map((file) => {
+      const cached = this.vueCache.get(file.path);
+      if (cached?.hash === file.hash) return cached.prepared;
+      const prepared = prepareVue(file);
+      this.vueCache.set(file.path, { hash: file.hash, prepared });
+      return prepared;
+    });
     const astroSources = files.filter((file) => /\.astro$/i.test(file.path)).map(prepareAstro);
     warnings.push(
       ...vueSources.flatMap((vue) => vue.warnings),
@@ -195,17 +208,12 @@ export class TypeScriptGraph {
       .getSourceFiles()
       .filter((source) => inputs.has(resolve(source.fileName)));
     for (const source of roots) {
+      const input = inputs.get(resolve(source.fileName));
+      if (!input) continue;
+      const path = input.path;
       for (const error of this.program.getSyntacticDiagnostics(source))
-        warnings.push(
-          (inputs.get(resolve(source.fileName))?.path ??
-            normalizePath(relative(root, source.fileName))) +
-            ": " +
-            ts.flattenDiagnosticMessageText(error.messageText, " "),
-        );
+        warnings.push(`${path}: ${ts.flattenDiagnosticMessageText(error.messageText, " ")}`);
       const counters = new Map<string, number>();
-      const path =
-        inputs.get(resolve(source.fileName))?.path ??
-        normalizePath(relative(root, source.fileName));
       const vue = vueByPath.get(resolve(source.fileName));
       const componentSource = vue ?? astroByPath.get(resolve(source.fileName));
       if (componentSource) {

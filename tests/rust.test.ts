@@ -351,3 +351,38 @@ test("Rust rebuilds cross-file edges after imports, target edits, renames and de
     await f.cleanup();
   }
 });
+
+test("Rust blocks local fn calls shadowed by loop/match/if-let/closure and resolves nested fn safely", async () => {
+  const f = await fixture({
+    "src/lib.rs": `mod shared;
+fn helper() {}
+fn shadowed_variants(items: Vec<fn()>, maybe: Option<fn()>) {
+    for helper in items { helper(); }
+    match maybe { Some(helper) => helper(), None => () }
+    if let Some(helper) = maybe { helper(); }
+    let _call = |helper: fn()| helper();
+}
+fn nested_scope(items: Vec<fn()>) {
+    fn local_only() {}
+    local_only();
+    {
+        let local_only = || {};
+        local_only();
+    }
+    for local_only in items { local_only(); }
+}
+pub fn library_call() { shared::run(); }
+`,
+    "src/main.rs": "mod shared; pub fn binary_call() { shared::run(); }\n",
+    "src/shared.rs": "fn internal_step() {}\npub fn run() { internal_step(); }\n",
+  });
+  try {
+    assert.deepEqual(await rustCalls(f, "shadowed_variants"), []);
+    assert.deepEqual(await rustCalls(f, "nested_scope"), ["nested_scope::local_only"]);
+    assert.deepEqual(await rustCalls(f, "library_call"), []);
+    assert.deepEqual(await rustCalls(f, "binary_call"), []);
+    assert.deepEqual(await rustCalls(f, "run"), ["internal_step"]);
+  } finally {
+    await f.cleanup();
+  }
+});

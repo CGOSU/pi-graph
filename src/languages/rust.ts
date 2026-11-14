@@ -1,5 +1,5 @@
 import { hashContent } from "../core/files.js";
-import { searchDocument } from "../core/text.js";
+import { searchDocument, tokens } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
 import { linkRustProject } from "./rust-project.js";
 import {
@@ -68,88 +68,6 @@ function documentation(node: Node): string {
     parts.unshift(previous.text);
   }
   return parts.join(" ").slice(0, 2000);
-}
-function patternContains(node: Node | null, name: string): boolean {
-  return (
-    !!node &&
-    ((node.type === "identifier" && node.text === name) ||
-      namedChildren(node).some((child) => patternContains(child, name)))
-  );
-}
-function shadows(node: Node, scope: Node, name: string): boolean {
-  const parameters = field(scope, "parameters");
-  if (
-    parameters &&
-    namedChildren(parameters).some((parameter) =>
-      patternContains(field(parameter, "pattern") ?? parameter, name),
-    )
-  )
-    return true;
-  return namedChildren(scope).some(
-    (child) =>
-      child.type === "let_declaration" &&
-      child.startIndex < node.startIndex &&
-      patternContains(field(child, "pattern"), name),
-  );
-}
-function callTarget(call: Node, owner: RustEntry, entries: RustEntry[]): RustEntry | undefined {
-  let expression = field(call, "function");
-  if (expression?.type === "generic_function") expression = field(expression, "function");
-  if (!expression) return undefined;
-  let candidates: RustEntry[] = [];
-  if (expression.type === "identifier") {
-    for (let scope: Node | null = call.parent; scope; scope = scope.parent) {
-      if (shadows(call, scope, expression.text)) return undefined;
-      candidates = entries.filter(
-        (entry) =>
-          entry.symbol.kind === "function" &&
-          entry.node.parent?.id === scope.id &&
-          entry.symbol.name === expression.text,
-      );
-      if (candidates.length || scope.type === "mod_item") break;
-    }
-  } else if (
-    expression.type === "field_expression" &&
-    field(expression, "value")?.text === "self" &&
-    owner.implementation
-  ) {
-    candidates = entries.filter(
-      (entry) =>
-        entry.implementation?.id === owner.implementation?.id &&
-        entry.symbol.name === field(expression, "field")?.text,
-    );
-  } else if (expression.type === "scoped_identifier") {
-    const path = expression.text;
-    if (path.startsWith("Self::") && owner.implementation) {
-      candidates = entries.filter(
-        (entry) =>
-          entry.implementation?.id === owner.implementation?.id &&
-          entry.symbol.name === field(expression, "name")?.text,
-      );
-    } else {
-      const modules: string[] = [];
-      for (let parent = call.parent; parent; parent = parent.parent) {
-        if (parent.type === "mod_item") modules.unshift(field(parent, "name")?.text ?? "");
-      }
-      let qualified = path;
-      if (qualified.startsWith("crate::")) {
-        modules.length = 0;
-        qualified = qualified.slice(7);
-      } else if (qualified.startsWith("self::")) qualified = qualified.slice(6);
-      else
-        while (qualified.startsWith("super::")) {
-          modules.pop();
-          qualified = qualified.slice(7);
-        }
-      const name = [...modules, qualified].join("::");
-      candidates = entries.filter(
-        (entry) =>
-          entry.symbol.qualifiedName === name &&
-          (entry.symbol.kind === "function" || entry.symbol.kind === "method"),
-      );
-    }
-  }
-  return candidates.length === 1 ? candidates[0] : undefined;
 }
 function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree: RustTree } {
   const tree = parser.parse(file.content);
@@ -265,38 +183,13 @@ function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree
         evidence: "syntax",
         line: entry.symbol.startLine,
       });
-    if (entry.symbol.kind !== "function" && entry.symbol.kind !== "method") continue;
-    function calls(node: Node): void {
-      if (
-        node.id !== entry.node.id &&
-        (kinds[node.type] || node.type === "impl_item" || node.type === "token_tree")
-      )
-        return;
-      if (node.type === "call_expression") {
-        const target = callTarget(node, entry, entries);
-        if (target && target.symbol.id !== entry.symbol.id)
-          edges.push({
-            source: entry.symbol.id,
-            target: target.symbol.id,
-            kind: "calls",
-            evidence: "syntax",
-            line: node.startPosition.row + 1,
-          });
-      }
-      for (const child of namedChildren(node)) calls(child);
-    }
-    calls(entry.node);
   }
   return {
     symbols: entries.map((entry) => entry.symbol),
     entries,
     modules,
     uses,
-    edges: [
-      ...new Map(
-        edges.map((edge) => [`${edge.source}|${edge.target}|${edge.kind}`, edge]),
-      ).values(),
-    ],
+    edges,
     warnings,
     tree,
   };
@@ -304,14 +197,13 @@ function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree
 export class RustGraph {
   private parser?: RustParser;
   private cache = new Map<string, { hash: string; graph: ReturnType<typeof fileGraph> }>();
-  async build(files: SourceFile[]): Promise<RustFileGraph> {
-    const result: RustFileGraph = {
+  async build(
+    files: SourceFile[],
+  ): Promise<{ symbols: GraphSymbol[]; edges: GraphEdge[]; warnings: string[] }> {
+    const result: { symbols: GraphSymbol[]; edges: GraphEdge[]; warnings: string[] } = {
       symbols: [],
       edges: [],
       warnings: [],
-      entries: [],
-      modules: [],
-      uses: [],
     };
     const current = new Set(files.map((file) => file.path));
     for (const [path, cached] of this.cache) {
@@ -341,13 +233,16 @@ export class RustGraph {
       result.symbols.push(
         ...graph.symbols.map((symbol) => {
           const qualifiedName = project.qualifiedNames.get(symbol.id);
-          return qualifiedName
-            ? {
-                ...symbol,
-                qualifiedName,
-                document: searchDocument([symbol.document, qualifiedName].join(" ")),
-              }
-            : symbol;
+          if (!qualifiedName || qualifiedName === symbol.qualifiedName) return symbol;
+          const documentTokens = symbol.document
+            ? new Set(symbol.document.split(" "))
+            : new Set<string>();
+          for (const term of tokens(qualifiedName)) documentTokens.add(term);
+          return {
+            ...symbol,
+            qualifiedName,
+            document: [...documentTokens].join(" "),
+          };
         }),
       );
       result.edges.push(...graph.edges);

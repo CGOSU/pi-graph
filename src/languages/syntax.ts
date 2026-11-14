@@ -88,7 +88,7 @@ function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLangu
       counters.set(key, occurrence + 1);
       const start = item.node.startIndex;
       const finish = end(item);
-      const excerpt = file.content.slice(start, Math.min(finish, start + 1800));
+      const excerpt = file.content.slice(start, Math.min(finish, start + 260));
       const body =
         item.node.childForFieldName("body") ??
         item.end ??

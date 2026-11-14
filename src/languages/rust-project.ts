@@ -8,7 +8,6 @@ interface ParsedFile {
   graph: RustFileGraph;
 }
 interface ProjectContext {
-  rootPath: string;
   modules: Map<string, string | null>;
   fileModules: Map<string, string[] | null>;
   imports: Map<string, Map<string, string[][]>>;
@@ -81,7 +80,6 @@ function setFileModule(context: ProjectContext, filePath: string, modulePath: st
 }
 function buildContext(rootPath: string, parsed: Map<string, ParsedFile>): ProjectContext {
   const context: ProjectContext = {
-    rootPath,
     modules: new Map(),
     fileModules: new Map(),
     imports: new Map(),
@@ -112,8 +110,8 @@ function buildContext(rootPath: string, parsed: Map<string, ParsedFile>): Projec
         setModule(context, declaredPath, item.filePath);
         continue;
       }
-      const candidates = moduleCandidates(rootPath, declaredPath).filter((candidate) =>
-        parsed.has(candidate),
+      const candidates = moduleCandidates(rootPath, declaredPath).filter(
+        (candidate) => candidate !== item.filePath && parsed.has(candidate),
       );
       if (candidates.length !== 1) {
         setModule(context, declaredPath, null);
@@ -471,7 +469,21 @@ function resolveCall(
     return methods.length === 1 ? methods[0] : undefined;
   }
   if (expression.type === "identifier") {
-    if (shadowsCall(call, entry.node, expression.text)) return undefined;
+    const shadowedScopes = new Set(
+      shadowingBindings(call, entry.node, expression.text).map((binding) => binding.scope.id),
+    );
+    for (let scope: RustNode | null = call.parent; scope; scope = scope.parent) {
+      if (scope.type === "mod_item" || scope.type === "source_file") break;
+      if (shadowedScopes.has(scope.id)) return undefined;
+      const localMatches = context.entries.filter(
+        (candidate) =>
+          candidate.entry.symbol.kind === "function" &&
+          candidate.entry.node.parent?.id === scope.id &&
+          candidate.entry.symbol.name === expression.text,
+      );
+      if (localMatches.length) return localMatches.length === 1 ? localMatches[0] : undefined;
+    }
+    if (shadowedScopes.size) return undefined;
     const candidates = pathCandidates(context, modulePath, [expression.text]);
     const targetPath = candidates[0];
     if (candidates.length !== 1 || !targetPath) return undefined;
@@ -508,8 +520,8 @@ function resolveCall(
   );
   return matches.length === 1 ? matches[0] : undefined;
 }
-function shadowsCall(call: RustNode, functionNode: RustNode, name: string): boolean {
-  return bindingsFor(functionNode).some(
+function shadowingBindings(call: RustNode, functionNode: RustNode, name: string): TypedBinding[] {
+  return bindingsFor(functionNode).filter(
     (binding) =>
       binding.name === name && binding.start < call.startIndex && isAncestor(binding.scope, call),
   );
@@ -558,19 +570,14 @@ function moduleContexts(parsed: Map<string, ParsedFile>): ProjectContext[] {
   for (const context of contexts)
     for (const [filePath, modulePath] of context.fileModules)
       if (modulePath) membership.set(filePath, (membership.get(filePath) ?? 0) + 1);
-  for (const [filePath, file] of parsed) {
-    if (!membership.has(filePath)) {
-      const context = buildContext(filePath, new Map([[filePath, file]]));
-      // An unreferenced file has no reliable crate root; retain only its local inline scope.
-      context.fileModules.set(filePath, []);
-      for (const declaration of file.graph.modules)
-        if (declaration.inline)
-          setModule(context, [...declaration.modulePath, declaration.name], filePath);
-      contexts.push(context);
-      membership.set(filePath, 1);
-    }
-  }
   for (const context of contexts) finalizeContext(context, parsed, membership);
+  for (const [filePath, file] of parsed) {
+    if (membership.get(filePath) === 1) continue;
+    // Files outside a unique crate root keep only isolated single-file resolution.
+    const context = buildContext(filePath, new Map([[filePath, file]]));
+    finalizeContext(context, parsed, new Map([[filePath, 1]]));
+    contexts.push(context);
+  }
   return contexts;
 }
 
@@ -589,7 +596,10 @@ export function linkRustProject(
   const methodParents = new Map<string, string>();
   for (const context of contexts) {
     for (const item of context.entries) {
-      if (context.entriesByPath.get(item.qualifiedName)?.length === 1)
+      if (
+        item.qualifiedName !== item.entry.symbol.qualifiedName &&
+        context.entriesByPath.get(item.qualifiedName)?.length === 1
+      )
         qualifiedNames.set(item.entry.symbol.id, item.qualifiedName);
       if (item.entry.symbol.kind === "method") {
         const type = typeForImplementation(item.entry, context, item.modulePath);
@@ -624,11 +634,7 @@ export function linkRustProject(
     }
   }
   return {
-    edges: [
-      ...new Map(
-        edges.map((edge) => [`${edge.source}|${edge.target}|${edge.kind}`, edge]),
-      ).values(),
-    ],
+    edges,
     qualifiedNames,
   };
 }

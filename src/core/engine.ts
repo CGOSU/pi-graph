@@ -66,7 +66,8 @@ export class GraphEngine {
     attempt = 0,
   ): Promise<GraphStatus> {
     cancellation?.throwIfAborted();
-    const configHash = `syntax-v2:frameworks-v3:rust-wasm-v1:${languageConfiguration(this.root).hash}`;
+    const config = languageConfiguration(this.root);
+    const configHash = `syntax-v2:frameworks-v3:rust-wasm-v1:${config.hash}`;
     const head = repositoryHead(this.root);
     const now = Date.now();
     if (
@@ -118,6 +119,7 @@ export class GraphEngine {
       const graph = this.parser.build(
         this.root,
         scan.files.filter((file) => !/\.rs$/i.test(file.path) && !syntaxLanguage(file.path)),
+        config,
       );
       // Synchronous compilers cannot be preempted; cancellation is checked between phases.
       cancellation?.throwIfAborted();
