@@ -174,11 +174,27 @@ export class TypeScriptGraph {
     const host = ts.createCompilerHost(options, true);
     const original = host.getSourceFile.bind(host);
     const fileExists = host.fileExists.bind(host);
-    host.fileExists = (path) => inputs.has(resolve(path)) || fileExists(path);
+    const fileExistsCache = new Map<string, boolean>();
+    const readFileCache = new Map<string, string | undefined>();
+    const readSysFile = (absolute: string): string | undefined => {
+      if (readFileCache.has(absolute)) return readFileCache.get(absolute);
+      const content = ts.sys.readFile(absolute);
+      readFileCache.set(absolute, content);
+      return content;
+    };
+    host.fileExists = (path) => {
+      const absolute = resolve(path);
+      if (inputs.has(absolute)) return true;
+      const cached = fileExistsCache.get(absolute);
+      if (cached !== undefined) return cached;
+      const exists = fileExists(path);
+      fileExistsCache.set(absolute, exists);
+      return exists;
+    };
     host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
       const absolute = resolve(fileName);
       const input = inputs.get(absolute);
-      const content = input?.content ?? ts.sys.readFile(absolute);
+      const content = input?.content ?? readSysFile(absolute);
       if (content === undefined)
         return original(fileName, languageVersion, onError, shouldCreateNewSourceFile);
       const hash = input?.hash ?? hashContent(content);
@@ -188,8 +204,10 @@ export class TypeScriptGraph {
       this.cache.set(absolute, { hash, source });
       return source;
     };
-    host.readFile = (fileName) =>
-      inputs.get(resolve(fileName))?.content ?? ts.sys.readFile(fileName);
+    host.readFile = (fileName) => {
+      const absolute = resolve(fileName);
+      return inputs.get(absolute)?.content ?? readSysFile(absolute);
+    };
     this.program = ts.createProgram({
       rootNames: prepared.map((file) => file.absolutePath),
       options,
@@ -208,14 +226,15 @@ export class TypeScriptGraph {
       .getSourceFiles()
       .filter((source) => inputs.has(resolve(source.fileName)));
     for (const source of roots) {
-      const input = inputs.get(resolve(source.fileName));
+      const absolute = resolve(source.fileName);
+      const input = inputs.get(absolute);
       if (!input) continue;
       const path = input.path;
       for (const error of this.program.getSyntacticDiagnostics(source))
         warnings.push(`${path}: ${ts.flattenDiagnosticMessageText(error.messageText, " ")}`);
       const counters = new Map<string, number>();
-      const vue = vueByPath.get(resolve(source.fileName));
-      const componentSource = vue ?? astroByPath.get(resolve(source.fileName));
+      const vue = vueByPath.get(absolute);
+      const componentSource = vue ?? astroByPath.get(absolute);
       if (componentSource) {
         for (const statement of source.statements)
           if (ts.isExportAssignment(statement)) byNode.set(statement, componentSource.component);
@@ -252,11 +271,6 @@ export class TypeScriptGraph {
               .getLeadingCommentRanges(source.text, node.getFullStart())
               ?.map((range) => source.text.slice(range.pos, range.end))
               .join(" ") ?? "";
-          const summary =
-            comment
-              .replace(/\/\*+|\*\/|\/\/|\*/g, " ")
-              .trim()
-              .slice(0, 180) || header.slice(0, 180);
           owner = {
             id,
             path,
@@ -268,12 +282,10 @@ export class TypeScriptGraph {
             startLine: source.getLineAndCharacterOfPosition(start).line + 1,
             endLine: source.getLineAndCharacterOfPosition(end).line + 1,
             signature,
-            summary,
-            excerpt: text.slice(0, 260),
+            excerpt: text.slice(0, 180),
             document: searchDocument(
               [info.name, qualifiedName, signature, comment, path, ownText(node)].join(" "),
             ),
-            hash: hashContent(text),
             parentId: parent?.id ?? componentSource?.component.id,
             exported: isExported(node),
           };
@@ -294,7 +306,7 @@ export class TypeScriptGraph {
       visit(source);
       if (vue) {
         const analysis = analyzeVueOptions(vue, source);
-        vueMembersByPath.set(resolve(source.fileName), analysis);
+        vueMembersByPath.set(absolute, analysis);
         warnings.push(
           ...analysis.issues.map((issue) => `${vue.input.path}: ${issue.code}: ${issue.message}`),
         );
@@ -346,10 +358,8 @@ export class TypeScriptGraph {
         startLine: line,
         endLine: source.getLineAndCharacterOfPosition(end).line + 1,
         signature: `${kind} ${name}`,
-        summary: text.split(/\r?\n/)[0]?.slice(0, 180) ?? name,
-        excerpt: text.slice(0, 260),
+        excerpt: text.slice(0, 180),
         document: searchDocument([name, qualifiedName, path, text.slice(0, 8000)].join(" ")),
-        hash: hashContent(text),
         parentId: vue.component.id,
         exported: false,
       };
@@ -367,7 +377,8 @@ export class TypeScriptGraph {
       return symbol;
     }
     for (const source of roots) {
-      const astro = astroByPath.get(resolve(source.fileName));
+      const absolute = resolve(source.fileName);
+      const astro = astroByPath.get(absolute);
       if (astro) {
         const bindings = new Map<string, GraphSymbol>();
         for (const binding of checker.getSymbolsInScope(
@@ -379,7 +390,7 @@ export class TypeScriptGraph {
         }
         edges.push(...astroTemplateEdges(astro, (name) => bindings.get(name)));
       }
-      const vue = vueByPath.get(resolve(source.fileName));
+      const vue = vueByPath.get(absolute);
       if (vue) {
         const bindingCandidates = new Map<string, Map<string, GraphSymbol>>();
         function addBinding(name: string, target: GraphSymbol): void {

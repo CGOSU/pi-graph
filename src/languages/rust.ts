@@ -1,4 +1,3 @@
-import { hashContent } from "../core/files.js";
 import { searchDocument, tokens } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile, SymbolKind } from "../core/types.js";
 import { linkRustProject } from "./rust-project.js";
@@ -137,12 +136,10 @@ function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree
         startLine: node.startPosition.row + 1,
         endLine: node.endPosition.row + 1,
         signature,
-        summary: (comment || signature).slice(0, 180),
-        excerpt: text.slice(0, 260),
+        excerpt: text.slice(0, 180),
         document: searchDocument(
           [name, qualifiedName, signature, comment, file.path, text.slice(0, 8000)].join(" "),
         ),
-        hash: hashContent(text),
         parentId: parent?.id,
         exported:
           namedChildren(node).some((child) => child.type === "visibility_modifier") ||

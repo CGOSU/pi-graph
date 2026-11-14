@@ -25,13 +25,12 @@ export interface GraphSymbol {
   startLine: number;
   endLine: number;
   signature: string;
-  summary: string;
   excerpt: string;
   document: string;
-  hash: string;
   parentId?: string;
   exported: boolean;
 }
+export type PublicSymbol = Omit<GraphSymbol, "document">;
 export interface GraphEdge {
   source: string;
   target: string;
@@ -92,7 +91,7 @@ export interface InspectInput {
   maxCharacters?: number;
 }
 export interface InspectResult {
-  symbol: Omit<GraphSymbol, "document">;
+  symbol: PublicSymbol;
   source: string;
   truncated: boolean;
   neighbors: LocatedSymbol[];

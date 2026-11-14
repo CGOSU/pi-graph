@@ -43,10 +43,8 @@ export function prepareAstro(file: SourceFile): AstroSource {
       startLine: file.content.slice(0, start).split("\n").length,
       endLine: file.content.split("\n").length,
       signature: `${kind} ${name}`,
-      summary: text.slice(0, 180),
-      excerpt: text.slice(0, 260),
+      excerpt: text.slice(0, 180),
       document: searchDocument([name, kind, file.path, text.slice(0, 8000)].join(" ")),
-      hash: hashContent(text),
       exported: kind === "component",
     };
   }

@@ -14,13 +14,58 @@ import { locate, located } from "./retrieval.js";
 import { GraphStore } from "./store.js";
 import type {
   GraphCancellation,
+  GraphEdge,
   GraphStatus,
+  GraphSymbol,
   InspectInput,
   InspectResult,
   LocateInput,
   LocateResult,
   SourceFile,
 } from "./types.js";
+
+const CONFIG_VERSION = "syntax-v3:frameworks-v4:rust-wasm-v2";
+
+interface DomainWarnings {
+  ts: string[];
+  rust: string[];
+  syntax: Record<string, string[]>;
+}
+
+function isRustPath(path: string): boolean {
+  return /\.rs$/i.test(path);
+}
+
+function isSyntaxPath(path: string): boolean {
+  return Boolean(syntaxLanguage(path));
+}
+
+function isTsPath(path: string): boolean {
+  return !isRustPath(path) && !isSyntaxPath(path);
+}
+
+function readDomainWarnings(raw: string | undefined): DomainWarnings | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DomainWarnings>;
+    if (
+      Array.isArray(parsed.ts) &&
+      Array.isArray(parsed.rust) &&
+      parsed.syntax !== null &&
+      typeof parsed.syntax === "object" &&
+      !Array.isArray(parsed.syntax)
+    ) {
+      return {
+        ts: parsed.ts,
+        rust: parsed.rust,
+        syntax: parsed.syntax as Record<string, string[]>,
+      };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export class GraphEngine {
   readonly root: string;
@@ -67,7 +112,7 @@ export class GraphEngine {
   ): Promise<GraphStatus> {
     cancellation?.throwIfAborted();
     const config = languageConfiguration(this.root);
-    const configHash = `syntax-v2:frameworks-v3:rust-wasm-v1:${config.hash}`;
+    const configHash = `${CONFIG_VERSION}:${config.hash}`;
     const head = repositoryHead(this.root);
     const now = Date.now();
     if (
@@ -94,8 +139,7 @@ export class GraphEngine {
       if (
         scan.isCurrent() &&
         repositoryHead(this.root) === head &&
-        `syntax-v2:frameworks-v3:rust-wasm-v1:${languageConfiguration(this.root).hash}` ===
-          configHash
+        `${CONFIG_VERSION}:${languageConfiguration(this.root).hash}` === configHash
       )
         return;
       if (attempt >= 2) throw new Error("Sources changed while indexing; retry the graph query.");
@@ -108,47 +152,99 @@ export class GraphEngine {
     const current = new Set(scan.files.map((file) => file.path));
     const deleted = [...previous.keys()].filter((path) => !current.has(path));
     cancellation?.throwIfAborted();
+    const storedDomainWarnings = readDomainWarnings(this.store.metadata("domainWarnings"));
+    const configChanged = this.store.metadata("configHash") !== configHash;
+    const warningsMissing = this.store.warnings() === undefined;
+    const scanWarningsChanged =
+      JSON.stringify(scan.warnings) !== this.store.metadata("scanWarnings");
     if (
       force ||
       changed.length ||
       deleted.length ||
-      this.store.metadata("configHash") !== configHash ||
-      this.store.warnings() === undefined ||
-      JSON.stringify(scan.warnings) !== this.store.metadata("scanWarnings")
+      configChanged ||
+      warningsMissing ||
+      scanWarningsChanged ||
+      !storedDomainWarnings
     ) {
-      const graph = this.parser.build(
-        this.root,
-        scan.files.filter((file) => !/\.rs$/i.test(file.path) && !syntaxLanguage(file.path)),
-        config,
-      );
-      // Synchronous compilers cannot be preempted; cancellation is checked between phases.
-      cancellation?.throwIfAborted();
-      const rust = await this.rustParser.build(
-        scan.files.filter((file) => /\.rs$/i.test(file.path)),
-      );
-      graph.symbols.push(...rust.symbols);
-      graph.edges.push(...rust.edges);
-      graph.warnings.push(...rust.warnings);
-      cancellation?.throwIfAborted();
-      const syntax = await this.syntaxParser.build(
-        scan.files.filter((file) => syntaxLanguage(file.path)),
-      );
-      graph.symbols.push(...syntax.symbols);
-      graph.edges.push(...syntax.edges);
-      graph.warnings.push(...syntax.warnings);
-      cancellation?.throwIfAborted();
+      const fullRebuild = force || configChanged || warningsMissing || !storedDomainWarnings;
+      const tsDirty =
+        fullRebuild || changed.some((file) => isTsPath(file.path)) || deleted.some(isTsPath);
+      const rustDirty =
+        fullRebuild || changed.some((file) => isRustPath(file.path)) || deleted.some(isRustPath);
+      const syntaxDirty =
+        fullRebuild ||
+        changed.some((file) => isSyntaxPath(file.path)) ||
+        deleted.some(isSyntaxPath);
+
+      const symbols: GraphSymbol[] = [];
+      const edges: GraphEdge[] = [];
+      const domainWarnings: DomainWarnings = storedDomainWarnings
+        ? {
+            ts: [...storedDomainWarnings.ts],
+            rust: [...storedDomainWarnings.rust],
+            syntax: { ...storedDomainWarnings.syntax },
+          }
+        : { ts: [], rust: [], syntax: {} };
+      const scopePaths = fullRebuild ? undefined : ([] as string[]);
+
+      if (tsDirty) {
+        const tsFiles = scan.files.filter((file) => isTsPath(file.path));
+        if (scopePaths) {
+          scopePaths.push(...tsFiles.map((file) => file.path), ...deleted.filter(isTsPath));
+        }
+        const ts = this.parser.build(this.root, tsFiles, config);
+        symbols.push(...ts.symbols);
+        edges.push(...ts.edges);
+        domainWarnings.ts = ts.warnings;
+        // Synchronous compilers cannot be preempted; cancellation is checked between phases.
+        cancellation?.throwIfAborted();
+      }
+
+      if (rustDirty) {
+        const rustFiles = scan.files.filter((file) => isRustPath(file.path));
+        if (scopePaths) {
+          scopePaths.push(...rustFiles.map((file) => file.path), ...deleted.filter(isRustPath));
+        }
+        const rust = await this.rustParser.build(rustFiles);
+        symbols.push(...rust.symbols);
+        edges.push(...rust.edges);
+        domainWarnings.rust = rust.warnings;
+        cancellation?.throwIfAborted();
+      }
+
+      if (syntaxDirty) {
+        const syntaxInput = fullRebuild
+          ? scan.files.filter((file) => isSyntaxPath(file.path))
+          : changed.filter((file) => isSyntaxPath(file.path));
+        const syntaxDeleted = deleted.filter(isSyntaxPath);
+        if (fullRebuild) domainWarnings.syntax = {};
+        else if (scopePaths) {
+          scopePaths.push(...syntaxInput.map((file) => file.path), ...syntaxDeleted);
+        }
+        const syntax = await this.syntaxParser.update(syntaxInput, syntaxDeleted);
+        for (const path of syntaxDeleted) delete domainWarnings.syntax[path];
+        for (const [path, fileGraph] of syntax.files) {
+          symbols.push(...fileGraph.symbols);
+          edges.push(...fileGraph.edges);
+          if (fileGraph.warnings.length) domainWarnings.syntax[path] = fileGraph.warnings;
+          else delete domainWarnings.syntax[path];
+        }
+        cancellation?.throwIfAborted();
+      }
+
       const retry = retryIfChanged();
       if (retry) return retry;
       // Commit and in-memory publication must finish together once the transaction starts.
-      const warnings = [...scan.warnings, ...graph.warnings].slice(0, 12);
-      this.store.commit(
-        scan.files,
-        graph.symbols,
-        graph.edges,
-        configHash,
-        warnings,
-        scan.warnings,
-      );
+      const warnings = [
+        ...scan.warnings,
+        ...domainWarnings.ts,
+        ...domainWarnings.rust,
+        ...Object.values(domainWarnings.syntax).flat(),
+      ].slice(0, 12);
+      this.store.commit(scan.files, symbols, edges, configHash, warnings, scan.warnings, {
+        scopePaths,
+        extraMetadata: { domainWarnings: JSON.stringify(domainWarnings) },
+      });
       this.warnings = warnings;
     } else {
       this.warnings = this.store.warnings() ?? [];
@@ -208,10 +304,8 @@ export class GraphEngine {
       if (other) neighbors.push(located(other, 0, `${edge.kind} (${edge.evidence})`, edge));
     }
     const ids = new Set(neighbors.map((neighbor) => neighbor.id));
-    const publicSymbol: InspectResult["symbol"] & { document?: string } = { ...symbol };
-    delete publicSymbol.document;
     return {
-      symbol: publicSymbol,
+      symbol,
       source: text.slice(0, maxCharacters),
       truncated: text.length > maxCharacters,
       neighbors,

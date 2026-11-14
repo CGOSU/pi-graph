@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { scanSources } from "../src/core/files.js";
 import { RustGraph } from "../src/languages/rust.js";
+import { SyntaxGraph } from "../src/languages/syntax.js";
+import { TypeScriptGraph } from "../src/languages/typescript.js";
 import { fixture } from "./helpers.js";
 
 test("bounded scans keep source contents coherent and reapply ignore changes", async () => {
@@ -180,6 +182,82 @@ test("failed parallel reads preserve the persisted snapshot and allow later queu
     assert.equal(f.engine.status().files, 3);
   } finally {
     await chmod(path, 0o600);
+    await f.cleanup();
+  }
+});
+
+test("single-domain edits skip unrelated language builders and preserve untouched warnings", async (t) => {
+  const f = await fixture({
+    "app.ts": "export function tsWorker(): number { return 1; }\n",
+    "lib.rs": "pub fn rust_worker() -> i32 { 2 }\n",
+    "broken.go": "package main\nfunc broken( {\n",
+  });
+  try {
+    const initial = await f.engine.refresh();
+    assert(initial.warnings.some((warning) => warning.includes("broken.go:")));
+
+    let tsCalls = 0;
+    let rustCalls = 0;
+    let syntaxCalls = 0;
+    const tsBuild = TypeScriptGraph.prototype.build;
+    const rustBuild = RustGraph.prototype.build;
+    const syntaxUpdate = SyntaxGraph.prototype.update;
+
+    t.mock.method(
+      TypeScriptGraph.prototype,
+      "build",
+      function (this: TypeScriptGraph, ...args: Parameters<TypeScriptGraph["build"]>) {
+        tsCalls++;
+        return tsBuild.apply(this, args);
+      },
+    );
+    t.mock.method(
+      RustGraph.prototype,
+      "build",
+      function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
+        rustCalls++;
+        return rustBuild.apply(this, args);
+      },
+    );
+    t.mock.method(
+      SyntaxGraph.prototype,
+      "update",
+      function (this: SyntaxGraph, ...args: Parameters<SyntaxGraph["update"]>) {
+        syntaxCalls++;
+        return syntaxUpdate.apply(this, args);
+      },
+    );
+
+    await f.write("app.ts", "export function tsWorkerUpdated(): number { return 42; }\n");
+    const afterTs = await f.engine.refresh();
+    assert.equal(tsCalls, 1);
+    assert.equal(rustCalls, 0);
+    assert.equal(syntaxCalls, 0);
+    assert(afterTs.warnings.some((warning) => warning.includes("broken.go:")));
+    assert.equal((await f.engine.locate({ query: "rust_worker" })).results[0]?.name, "rust_worker");
+    assert.equal(
+      (await f.engine.locate({ query: "tsWorkerUpdated" })).results[0]?.name,
+      "tsWorkerUpdated",
+    );
+
+    await f.write("lib.rs", "pub fn rust_worker_updated() -> i32 { 9 }\n");
+    await f.engine.refresh();
+    assert.equal(tsCalls, 1);
+    assert.equal(rustCalls, 1);
+    assert.equal(syntaxCalls, 0);
+    assert.equal(
+      (await f.engine.locate({ query: "rust_worker_updated" })).results[0]?.name,
+      "rust_worker_updated",
+    );
+
+    await f.write("broken.go", "package main\nfunc fixedGo() int { return 7 }\n");
+    const afterGo = await f.engine.refresh();
+    assert.equal(tsCalls, 1);
+    assert.equal(rustCalls, 1);
+    assert.equal(syntaxCalls, 1);
+    assert.equal(afterGo.warnings.length, 0);
+    assert.equal((await f.engine.locate({ query: "fixedGo" })).results[0]?.name, "fixedGo");
+  } finally {
     await f.cleanup();
   }
 });

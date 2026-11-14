@@ -2,7 +2,14 @@ import { safeScope } from "./files.js";
 import { extractIdentifiers, nameMatch } from "./names.js";
 import type { GraphStore } from "./store.js";
 import { queryTokenGroups, tokens } from "./text.js";
-import type { GraphEdge, GraphSymbol, LocatedSymbol, LocateInput, LocateResult } from "./types.js";
+import type {
+  GraphEdge,
+  GraphSymbol,
+  LocatedSymbol,
+  LocateInput,
+  LocateResult,
+  PublicSymbol,
+} from "./types.js";
 
 interface Candidate {
   symbol: GraphSymbol;
@@ -101,7 +108,7 @@ function groupLocalEvidence(
   for (const id of grouped) candidates.delete(id);
 }
 export function located(
-  symbol: GraphSymbol,
+  symbol: PublicSymbol,
   scoreValue: number,
   reason: string,
   edge?: GraphEdge,
@@ -177,7 +184,14 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
         a.symbol.id.localeCompare(b.symbol.id),
     )
     .slice(0, 8);
-  const neighborhoods = seeds.map((seed) => ({ seed, edges: store.neighbors(seed.symbol.id, 16) }));
+  const neighborsBySeed = store.neighborsBatch(
+    seeds.map((seed) => seed.symbol.id),
+    16,
+  );
+  const neighborhoods = seeds.map((seed) => ({
+    seed,
+    edges: neighborsBySeed.get(seed.symbol.id) ?? [],
+  }));
   const symbols = new Map([...candidates.values()].map(({ symbol }) => [symbol.id, symbol]));
   const missing = new Set<string>();
   for (const { seed, edges } of neighborhoods) {

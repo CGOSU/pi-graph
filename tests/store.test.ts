@@ -20,10 +20,8 @@ function symbol(id: string, path: string, document: string): GraphSymbol {
     startLine: 1,
     endLine: 1,
     signature: `function ${id}()`,
-    summary: "",
     excerpt: `function ${id}() {}`,
     document,
-    hash: document,
     exported: true,
   };
 }
@@ -37,7 +35,7 @@ interface GraphSnapshot {
   edges: GraphEdge[];
 }
 const initial: GraphSnapshot = {
-  files: [alpha, beta, gamma].map(({ path, hash }) => ({ path, hash })),
+  files: [alpha, beta, gamma].map(({ id, path }) => ({ path, hash: id })),
   symbols: [alpha, beta, gamma],
   edges: [
     { source: "alpha", target: "beta", kind: "calls", evidence: "syntax", line: 1 },
@@ -48,10 +46,10 @@ const initial: GraphSnapshot = {
 const changed: GraphSnapshot = {
   files: [
     { path: alpha.path, hash: "updated" },
-    { path: gamma.path, hash: gamma.hash },
-    { path: delta.path, hash: delta.hash },
+    { path: gamma.path, hash: gamma.id },
+    { path: delta.path, hash: delta.id },
   ],
-  symbols: [{ ...alpha, document: "alpha updated", hash: "updated" }, gamma, delta],
+  symbols: [{ ...alpha, document: "alpha updated" }, gamma, delta],
   edges: [
     { source: "alpha", target: "delta", kind: "calls", evidence: "type-resolved", line: 8 },
     { source: "alpha", target: "gamma", kind: "references", evidence: "type-resolved", line: 8 },
@@ -207,9 +205,7 @@ test("bulk FTS changes preserve persisted searches without stale or duplicate do
       .all();
     const current = symbols
       .slice(0, 1200)
-      .map((entry, i) =>
-        i < 1100 ? { ...entry, document: `updatedword token${i}`, hash: "updated" } : entry,
-      );
+      .map((entry, i) => (i < 1100 ? { ...entry, document: `updatedword token${i}` } : entry));
     current.push(symbol("new'\"?\n%_id", "bulk.ts", "addedword"));
     const reopened = new GraphStore(join(root, "index.sqlite"));
     try {
@@ -245,7 +241,7 @@ test("bulk FTS changes preserve persisted searches without stale or duplicate do
 test("batch symbol reads bind quoted IDs and see new persisted data after reuse", async () => {
   await withStore((store) => {
     const quoted = symbol("odd'\"?\n%_id", "quoted.ts", "quoted");
-    const files: FileRecord[] = [{ path: quoted.path, hash: quoted.hash }];
+    const files: FileRecord[] = [{ path: quoted.path, hash: quoted.id }];
     store.commit(files, [quoted], [], "config");
     assert.deepEqual(store.symbols([]), new Map());
     assert.deepEqual(
@@ -367,5 +363,176 @@ test("opening a legacy database backfills names and later changes are atomic", a
     } finally {
       reopened.close();
     }
+  });
+});
+
+test("legacy symbols table without document column migrates cleanly on open", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-graph-legacy-doc-"));
+  const indexPath = join(root, "index.sqlite");
+  try {
+    const legacy = new DatabaseSync(indexPath);
+    const legacyAlpha = symbol("alpha", "src/alpha.ts", "alpha document text");
+    const legacyBeta = symbol("beta", "src/beta.ts", "beta document text");
+    legacy.exec(`
+      CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE files (path TEXT PRIMARY KEY, hash TEXT NOT NULL);
+      CREATE TABLE symbols (id TEXT PRIMARY KEY, path TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE edges (source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (source, target, kind));
+      CREATE VIRTUAL TABLE documents USING fts5(id UNINDEXED, document, tokenize='unicode61');
+    `);
+    legacy
+      .prepare("INSERT INTO symbols(id,path,data) VALUES (?,?,?)")
+      .run(
+        legacyAlpha.id,
+        legacyAlpha.path,
+        JSON.stringify({ ...legacyAlpha, summary: "legacy", hash: "legacy-hash" }),
+      );
+    legacy
+      .prepare("INSERT INTO symbols(id,path,data) VALUES (?,?,?)")
+      .run(
+        legacyBeta.id,
+        legacyBeta.path,
+        JSON.stringify({ ...legacyBeta, summary: "legacy", hash: "legacy-hash" }),
+      );
+    legacy
+      .prepare("INSERT INTO documents(id,document) VALUES (?,?)")
+      .run(legacyAlpha.id, legacyAlpha.document);
+    legacy
+      .prepare("INSERT INTO documents(id,document) VALUES (?,?)")
+      .run(legacyBeta.id, legacyBeta.document);
+    legacy.prepare("INSERT INTO metadata(key,value) VALUES ('revision','4')").run();
+    legacy.close();
+
+    const store = new GraphStore(indexPath);
+    try {
+      const publicAlpha = store.symbol(legacyAlpha.id);
+      assert(publicAlpha);
+      assert.equal("document" in publicAlpha, false);
+      assert.deepEqual(
+        store.symbols([legacyAlpha.id, legacyBeta.id]),
+        new Map([
+          [legacyAlpha.id, legacyAlpha],
+          [legacyBeta.id, legacyBeta],
+        ]),
+      );
+      assert.deepEqual(store.search(["alpha"]), [legacyAlpha]);
+      const inspectDb = new DatabaseSync(indexPath, { readOnly: true });
+      try {
+        const columns = inspectDb
+          .prepare("PRAGMA table_info(symbols)")
+          .all()
+          .map((column) => String(column.name));
+        assert(columns.includes("document"));
+        const rawRow = inspectDb
+          .prepare("SELECT data, document FROM symbols WHERE id=?")
+          .get(legacyAlpha.id) as { data: string; document: string };
+        assert.equal(rawRow.document, legacyAlpha.document);
+        assert.equal("document" in JSON.parse(rawRow.data), false);
+      } finally {
+        inspectDb.close();
+      }
+    } finally {
+      store.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("neighborsBatch matches per-symbol neighbors without duplicates", async () => {
+  await withStore((store) => {
+    const a = symbol("a", "src/a.ts", "a");
+    const b = symbol("b", "src/b.ts", "b");
+    const c = symbol("c", "src/c.ts", "c");
+    const ab: GraphEdge = { source: "a", target: "b", kind: "calls", evidence: "syntax", line: 1 };
+    const bc: GraphEdge = { source: "b", target: "c", kind: "calls", evidence: "syntax", line: 2 };
+    const ca: GraphEdge = {
+      source: "c",
+      target: "a",
+      kind: "references",
+      evidence: "syntax",
+      line: 3,
+    };
+    store.commit(
+      [
+        { path: a.path, hash: "1" },
+        { path: b.path, hash: "1" },
+        { path: c.path, hash: "1" },
+      ],
+      [a, b, c],
+      [ab, bc, ca],
+      "config",
+    );
+    assert.deepEqual(store.neighborsBatch([], 10), new Map());
+    const batch = store.neighborsBatch(["a", "b", "a"], 10);
+    assert.deepEqual([...batch.keys()], ["a", "b"]);
+    assert.deepEqual(batch.get("a"), store.neighbors("a", 10));
+    assert.deepEqual(batch.get("b"), store.neighbors("b", 10));
+    const limited = store.neighborsBatch(["a", "b"], 1);
+    assert.deepEqual(limited.get("a"), store.neighbors("a", 1));
+    assert.deepEqual(limited.get("b"), store.neighbors("b", 1));
+  });
+});
+
+test("scoped commit updates only scoped paths and preserves untouched symbols and edges", async () => {
+  await withStore((store) => {
+    const tsSym = symbol("ts_fn", "src/app.ts", "ts function");
+    const rsSym = symbol("rs_fn", "src/lib.rs", "rs function");
+    const goOld = symbol("go_old", "src/main.go", "go old");
+    const goUpdated = symbol("go_new", "src/main.go", "go new");
+    const tsEdge: GraphEdge = {
+      source: tsSym.id,
+      target: tsSym.id,
+      kind: "calls",
+      evidence: "type-resolved",
+      line: 1,
+    };
+    const goOldEdge: GraphEdge = {
+      source: goOld.id,
+      target: tsSym.id,
+      kind: "references",
+      evidence: "syntax",
+      line: 2,
+    };
+    const goNewEdge: GraphEdge = {
+      source: goUpdated.id,
+      target: rsSym.id,
+      kind: "calls",
+      evidence: "syntax",
+      line: 3,
+    };
+    store.commit(
+      [
+        { path: tsSym.path, hash: "1" },
+        { path: rsSym.path, hash: "1" },
+        { path: goOld.path, hash: "1" },
+      ],
+      [tsSym, rsSym, goOld],
+      [tsEdge, goOldEdge],
+      "config",
+    );
+
+    store.commit(
+      [
+        { path: tsSym.path, hash: "1" },
+        { path: rsSym.path, hash: "1" },
+        { path: goUpdated.path, hash: "2" },
+      ],
+      [goUpdated],
+      [goNewEdge],
+      "config",
+      [],
+      [],
+      { scopePaths: ["src/main.go"], extraMetadata: { domainWarnings: "{}" } },
+    );
+
+    assert.equal(store.symbol(goOld.id), undefined);
+    assert.equal(store.symbol(goUpdated.id)?.id, goUpdated.id);
+    assert.equal(store.symbol(tsSym.id)?.id, tsSym.id);
+    assert.equal(store.symbol(rsSym.id)?.id, rsSym.id);
+    assert.deepEqual(store.neighbors(tsSym.id), [tsEdge]);
+    assert.deepEqual(store.neighbors(goOld.id), []);
+    assert.deepEqual(store.neighbors(goUpdated.id), [goNewEdge]);
+    assert.equal(store.metadata("domainWarnings"), "{}");
   });
 });

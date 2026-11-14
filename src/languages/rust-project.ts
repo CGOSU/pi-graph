@@ -13,8 +13,11 @@ interface ProjectContext {
   imports: Map<string, Map<string, string[][]>>;
   entries: ContextEntry[];
   entriesByPath: Map<string, ContextEntry[]>;
+  entriesByImplementation: Map<number, ContextEntry[]>;
+  entriesByParent: Map<number, ContextEntry[]>;
   typeEntries: Map<string, ContextEntry[]>;
   inherentMethods: Map<string, ContextEntry[]>;
+  bindingsCache: Map<number, TypedBinding[]>;
 }
 interface ContextEntry {
   entry: RustEntry;
@@ -85,8 +88,11 @@ function buildContext(rootPath: string, parsed: Map<string, ParsedFile>): Projec
     imports: new Map(),
     entries: [],
     entriesByPath: new Map(),
+    entriesByImplementation: new Map(),
+    entriesByParent: new Map(),
     typeEntries: new Map(),
     inherentMethods: new Map(),
+    bindingsCache: new Map(),
   };
   setModule(context, [], rootPath);
   setFileModule(context, rootPath, []);
@@ -377,17 +383,25 @@ function resolveTypePath(
   const matches = typesAt(context, target);
   return matches.length === 1 ? matches[0] : undefined;
 }
+function cachedBindings(context: ProjectContext, functionNode: RustNode): TypedBinding[] {
+  const cached = context.bindingsCache.get(functionNode.id);
+  if (cached) return cached;
+  const computed = bindingsFor(functionNode);
+  context.bindingsCache.set(functionNode.id, computed);
+  return computed;
+}
 function typeOfBinding(
   call: RustNode,
   owner: RustEntry,
   context: ProjectContext,
   modulePath: string[],
 ): ContextEntry | undefined {
-  const receiver = field(field(call, "function")!, "value");
+  const fnNode = field(call, "function");
+  const receiver = fnNode ? field(fnNode, "value") : null;
   if (receiver?.type !== "identifier") return undefined;
   const body = field(owner.node, "body");
   if (!body) return undefined;
-  const candidates = bindingsFor(owner.node)
+  const candidates = cachedBindings(context, owner.node)
     .filter(
       (binding) =>
         binding.name === receiver.text &&
@@ -456,11 +470,9 @@ function resolveCall(
     const methodName = field(expression, "field")?.text;
     if (!methodName) return undefined;
     if (receiver?.text === "self" && entry.implementation) {
-      const matches = context.entries.filter(
+      const matches = (context.entriesByImplementation.get(entry.implementation.id) ?? []).filter(
         (candidate) =>
-          candidate.entry.implementation?.id === entry.implementation?.id &&
-          candidate.entry.symbol.name === methodName &&
-          candidate.entry.symbol.kind === "method",
+          candidate.entry.symbol.name === methodName && candidate.entry.symbol.kind === "method",
       );
       return matches.length === 1 ? matches[0] : undefined;
     }
@@ -470,15 +482,16 @@ function resolveCall(
   }
   if (expression.type === "identifier") {
     const shadowedScopes = new Set(
-      shadowingBindings(call, entry.node, expression.text).map((binding) => binding.scope.id),
+      shadowingBindings(context, call, entry.node, expression.text).map(
+        (binding) => binding.scope.id,
+      ),
     );
     for (let scope: RustNode | null = call.parent; scope; scope = scope.parent) {
       if (scope.type === "mod_item" || scope.type === "source_file") break;
       if (shadowedScopes.has(scope.id)) return undefined;
-      const localMatches = context.entries.filter(
+      const localMatches = (context.entriesByParent.get(scope.id) ?? []).filter(
         (candidate) =>
           candidate.entry.symbol.kind === "function" &&
-          candidate.entry.node.parent?.id === scope.id &&
           candidate.entry.symbol.name === expression.text,
       );
       if (localMatches.length) return localMatches.length === 1 ? localMatches[0] : undefined;
@@ -496,11 +509,9 @@ function resolveCall(
   const parts = pathParts(expression.text);
   if (parts[0] === "Self" && entry.implementation) {
     const methodName = parts.at(-1);
-    const matches = context.entries.filter(
+    const matches = (context.entriesByImplementation.get(entry.implementation.id) ?? []).filter(
       (candidate) =>
-        candidate.entry.implementation?.id === entry.implementation?.id &&
-        candidate.entry.symbol.name === methodName &&
-        candidate.entry.symbol.kind === "method",
+        candidate.entry.symbol.name === methodName && candidate.entry.symbol.kind === "method",
     );
     return matches.length === 1 ? matches[0] : undefined;
   }
@@ -520,8 +531,13 @@ function resolveCall(
   );
   return matches.length === 1 ? matches[0] : undefined;
 }
-function shadowingBindings(call: RustNode, functionNode: RustNode, name: string): TypedBinding[] {
-  return bindingsFor(functionNode).filter(
+function shadowingBindings(
+  context: ProjectContext,
+  call: RustNode,
+  functionNode: RustNode,
+  name: string,
+): TypedBinding[] {
+  return cachedBindings(context, functionNode).filter(
     (binding) =>
       binding.name === name && binding.start < call.startIndex && isAncestor(binding.scope, call),
   );
@@ -536,6 +552,16 @@ function addEntry(context: ProjectContext, fileModulePath: string[], entry: Rust
   const atPath = context.entriesByPath.get(qualifiedName) ?? [];
   atPath.push(item);
   context.entriesByPath.set(qualifiedName, atPath);
+  if (entry.implementation) {
+    const byImpl = context.entriesByImplementation.get(entry.implementation.id) ?? [];
+    byImpl.push(item);
+    context.entriesByImplementation.set(entry.implementation.id, byImpl);
+  }
+  if (entry.node.parent) {
+    const byParent = context.entriesByParent.get(entry.node.parent.id) ?? [];
+    byParent.push(item);
+    context.entriesByParent.set(entry.node.parent.id, byParent);
+  }
   if (entry.symbol.kind === "struct" || entry.symbol.kind === "enum") {
     const types = context.typeEntries.get(qualifiedName) ?? [];
     types.push(item);
@@ -595,7 +621,9 @@ export function linkRustProject(
   const qualifiedNames = new Map<string, string>();
   const methodParents = new Map<string, string>();
   for (const context of contexts) {
+    const entriesById = new Map<string, ContextEntry>();
     for (const item of context.entries) {
+      entriesById.set(item.entry.symbol.id, item);
       if (
         item.qualifiedName !== item.entry.symbol.qualifiedName &&
         context.entriesByPath.get(item.qualifiedName)?.length === 1
@@ -607,7 +635,7 @@ export function linkRustProject(
       }
     }
     for (const [methodId, typeId] of methodParents) {
-      const method = context.entries.find((item) => item.entry.symbol.id === methodId);
+      const method = entriesById.get(methodId);
       if (!method) continue;
       if (!method.entry.symbol.parentId || method.entry.symbol.parentId !== typeId)
         edges.push({

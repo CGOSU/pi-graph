@@ -11,18 +11,22 @@ import { locateText } from "../src/pi/extension.js";
 function snapshot(path: string) {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    const rows = (table: string) =>
-      (db.prepare(`SELECT data FROM ${table}`).all() as { data: string }[]).map((row) =>
-        JSON.parse(row.data),
-      );
+    const symbolRows = db.prepare("SELECT data,document FROM symbols").all() as unknown as {
+      data: string;
+      document: string;
+    }[];
+    const edgeRows = db.prepare("SELECT data FROM edges").all() as unknown as { data: string }[];
     const config = db.prepare("SELECT value FROM metadata WHERE key='configHash'").get() as
       | { value: string }
       | undefined;
     if (!config) throw new Error("Benchmark snapshot has no configuration hash");
     return {
       files: db.prepare("SELECT path,hash FROM files").all() as unknown as FileRecord[],
-      symbols: rows("symbols") as GraphSymbol[],
-      edges: rows("edges") as GraphEdge[],
+      symbols: symbolRows.map((row) => ({
+        ...(JSON.parse(row.data) as Omit<GraphSymbol, "document">),
+        document: row.document,
+      })) as GraphSymbol[],
+      edges: edgeRows.map((row) => JSON.parse(row.data)) as GraphEdge[],
       configHash: config.value,
     };
   } finally {

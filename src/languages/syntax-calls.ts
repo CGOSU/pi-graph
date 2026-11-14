@@ -42,82 +42,100 @@ function anonymousScope(call: Call, owner: SyntaxEntry): boolean {
   }
   return false;
 }
+function nearestEnclosing(entries: SyntaxEntry[], node: SyntaxNode): SyntaxEntry | undefined {
+  let best: SyntaxEntry | undefined;
+  let bestSpan = Number.POSITIVE_INFINITY;
+  for (const entry of entries) {
+    if (entry.symbol.start > node.startIndex) break;
+    if (node.endIndex <= entry.symbol.end) {
+      const span = entry.symbol.end - entry.symbol.start;
+      if (span < bestSpan) {
+        best = entry;
+        bestSpan = span;
+      }
+    }
+  }
+  return best;
+}
 export function syntaxCalls(
   nodes: SyntaxNode[],
   entries: SyntaxEntry[],
   adapter: SyntaxAdapter,
   language: SyntaxLanguage,
 ): GraphEdge[] {
-  const functions = entries.filter(callable);
-  const bindings = nodes.flatMap((node) =>
-    adapter.bindings(node).map((name) => {
-      const owner = entries
-        .filter(
-          (entry) =>
-            (callable(entry) ||
-              ["class", "struct", "interface", "enum"].includes(entry.symbol.kind)) &&
-            encloses(entry, node),
-        )
-        .sort((a, b) => a.symbol.end - a.symbol.start - (b.symbol.end - b.symbol.start))[0];
-      const block = lexicalScope(node);
-      return { name, node, owner, scope: block, parameter: node.type.includes("parameter") };
-    }),
-  );
+  const sortedFunctions = entries.filter(callable).sort((a, b) => a.symbol.start - b.symbol.start);
+  const sortedOwners = entries
+    .filter(
+      (entry) =>
+        callable(entry) || ["class", "struct", "interface", "enum"].includes(entry.symbol.kind),
+    )
+    .sort((a, b) => a.symbol.start - b.symbol.start);
+  const functionsByName = new Map<string, SyntaxEntry[]>();
+  for (const entry of sortedFunctions) {
+    const bucket = functionsByName.get(entry.symbol.name) ?? [];
+    bucket.push(entry);
+    functionsByName.set(entry.symbol.name, bucket);
+  }
+  const bindingsByName = new Map<
+    string,
+    { node: SyntaxNode; owner?: SyntaxEntry; scope: SyntaxNode; parameter: boolean }[]
+  >();
+  for (const node of nodes) {
+    const names = adapter.bindings(node);
+    if (!names.length) continue;
+    const owner = nearestEnclosing(sortedOwners, node);
+    const scope = lexicalScope(node);
+    const parameter = node.type.includes("parameter");
+    for (const name of names) {
+      const bucket = bindingsByName.get(name) ?? [];
+      bucket.push({ node, owner, scope, parameter });
+      bindingsByName.set(name, bucket);
+    }
+  }
   const edges: GraphEdge[] = [];
   for (const node of nodes) {
     const call = adapter.call(node);
     if (!call) continue;
-    const owner = functions
-      .filter((entry) => encloses(entry, node))
-      .sort((a, b) => a.symbol.end - a.symbol.start - (b.symbol.end - b.symbol.start))[0];
+    const owner = nearestEnclosing(sortedFunctions, node);
     if (!owner || anonymousScope(call, owner)) continue;
     const chain = ancestors(owner);
     const shadowed = (name: string) =>
-      bindings.some((binding) => {
-        if (binding.name !== name) return false;
+      (bindingsByName.get(name) ?? []).some((binding) => {
         // Parameters precede the body but belong to the declaration's full region.
         if (binding.parameter) return !!binding.owner && encloses(binding.owner, node);
         return binding.node.startIndex <= node.startIndex && contains(binding.scope, node);
       });
+    const candidates = functionsByName.get(call.name) ?? [];
     let targets: SyntaxEntry[];
     if (call.receiver) {
       if (language === "go") {
         const receiver = owner.declaration.receiver;
         if (!receiver || receiver.name !== call.receiver || shadowed(call.receiver)) continue;
-        targets = functions.filter(
-          (entry) =>
-            entry.declaration.receiver?.type === receiver.type && entry.symbol.name === call.name,
-        );
+        targets = candidates.filter((entry) => entry.declaration.receiver?.type === receiver.type);
       } else {
         if (call.receiver !== "this") continue;
         const container = chain.find((entry) =>
           ["class", "enum", "struct"].includes(entry.symbol.kind),
         );
         if (!container) continue;
-        targets = functions.filter(
-          (entry) =>
-            !entry.declaration.extension &&
-            entry.parent === container &&
-            entry.symbol.name === call.name,
+        targets = candidates.filter(
+          (entry) => !entry.declaration.extension && entry.parent === container,
         );
       }
     } else {
       if (shadowed(call.name)) continue;
-      targets = functions.filter((entry) => {
-        if (
-          entry.symbol.name !== call.name ||
-          entry.declaration.receiver ||
-          entry.declaration.extension
-        )
-          return false;
+      targets = candidates.filter((entry) => {
+        if (entry.declaration.receiver || entry.declaration.extension) return false;
         if (!entry.parent) return true;
         if (language === "go" && !callable(entry.parent)) return false;
         return chain.includes(entry.parent) && contains(lexicalScope(entry.declaration.node), node);
       });
-      const rank = (entry: SyntaxEntry) =>
-        entry.parent ? chain.indexOf(entry.parent) : chain.length;
-      const nearest = Math.min(...targets.map(rank));
-      targets = targets.filter((entry) => rank(entry) === nearest);
+      if (targets.length > 1) {
+        const rank = (entry: SyntaxEntry) =>
+          entry.parent ? chain.indexOf(entry.parent) : chain.length;
+        const nearest = Math.min(...targets.map(rank));
+        targets = targets.filter((entry) => rank(entry) === nearest);
+      }
     }
     if (targets.length !== 1) continue;
     const target = targets[0];

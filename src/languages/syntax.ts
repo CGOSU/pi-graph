@@ -1,4 +1,3 @@
-import { hashContent } from "../core/files.js";
 import { searchDocument } from "../core/text.js";
 import type { GraphEdge, GraphSymbol, SourceFile } from "../core/types.js";
 import { dart } from "./dart.js";
@@ -20,7 +19,7 @@ import {
   syntaxLanguage,
 } from "./tree-sitter.js";
 
-interface FileGraph {
+export interface SyntaxFileGraph {
   symbols: GraphSymbol[];
   edges: GraphEdge[];
   warnings: string[];
@@ -42,7 +41,11 @@ function documentation(node: SyntaxNode): string {
     parts.unshift(previous.text);
   return parts.join(" ").slice(0, 1200);
 }
-function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLanguage): FileGraph {
+function fileGraph(
+  file: SourceFile,
+  parser: SyntaxParser,
+  language: SyntaxLanguage,
+): SyntaxFileGraph {
   const tree = parser.parse(file.content);
   if (!tree) throw new Error(`${file.path}: ${language} parser did not produce a syntax tree`);
   try {
@@ -50,23 +53,34 @@ function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLangu
     const nodes = [...descendants(tree.rootNode)];
     const declarations = nodes.flatMap((node) => adapter.declarations(node));
     const parents = new Map<Declaration, Declaration>();
+    const containers = declarations.filter(container);
+    const receiverTypes = new Map<string, Declaration[]>();
     for (const item of declarations) {
-      let candidates = declarations.filter(
-        (candidate) =>
-          candidate !== item &&
-          container(candidate) &&
-          candidate.node.startIndex <= item.node.startIndex &&
-          end(item) <= end(candidate),
-      );
-      if (item.receiver)
-        candidates = declarations.filter(
-          (candidate) =>
-            ["struct", "type"].includes(candidate.kind) &&
-            candidate.name.text === item.receiver?.type,
-        );
-      candidates.sort((a, b) => end(a) - a.node.startIndex - (end(b) - b.node.startIndex));
-      if (candidates[0] && (!item.receiver || candidates.length === 1))
-        parents.set(item, candidates[0]);
+      if (item.kind !== "struct" && item.kind !== "type") continue;
+      const list = receiverTypes.get(item.name.text) ?? [];
+      list.push(item);
+      receiverTypes.set(item.name.text, list);
+    }
+    for (const item of declarations) {
+      if (item.receiver) {
+        const candidates = receiverTypes.get(item.receiver.type);
+        if (candidates?.length === 1 && candidates[0]) parents.set(item, candidates[0]);
+        continue;
+      }
+      let best: Declaration | undefined;
+      let bestSpan = Number.POSITIVE_INFINITY;
+      for (const candidate of containers) {
+        if (candidate === item) continue;
+        const candidateEnd = end(candidate);
+        if (candidate.node.startIndex <= item.node.startIndex && end(item) <= candidateEnd) {
+          const span = candidateEnd - candidate.node.startIndex;
+          if (span < bestSpan) {
+            best = candidate;
+            bestSpan = span;
+          }
+        }
+      }
+      if (best) parents.set(item, best);
     }
     const entries = new Map<Declaration, SyntaxEntry>();
     const counters = new Map<string, number>();
@@ -88,7 +102,7 @@ function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLangu
       counters.set(key, occurrence + 1);
       const start = item.node.startIndex;
       const finish = end(item);
-      const excerpt = file.content.slice(start, Math.min(finish, start + 260));
+      const excerpt = file.content.slice(start, Math.min(finish, start + 180));
       const body =
         item.node.childForFieldName("body") ??
         item.end ??
@@ -99,7 +113,7 @@ function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLangu
         .slice(start, body?.startIndex ?? finish)
         .replace(/\s+/g, " ")
         .slice(0, 300);
-      const summary = documentation(item.node);
+      const comment = documentation(item.node);
       const modifiers =
         namedChildren(item.node).find((child) => child.type === "modifiers")?.text ?? "";
       const exported =
@@ -121,10 +135,8 @@ function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLangu
         startLine: item.node.startPosition.row + 1,
         endLine: (item.end ?? item.node).endPosition.row + 1,
         signature,
-        summary,
         excerpt,
-        document: searchDocument([qualifiedName, file.path, signature, summary].join(" ")),
-        hash: hashContent(file.content.slice(start, finish)),
+        document: searchDocument([qualifiedName, file.path, signature, comment].join(" ")),
         parentId: parent?.symbol.id,
         exported,
       };
@@ -161,29 +173,46 @@ function fileGraph(file: SourceFile, parser: SyntaxParser, language: SyntaxLangu
 }
 export class SyntaxGraph {
   private parsers = new Map<SyntaxLanguage, SyntaxParser>();
-  private cache = new Map<string, { hash: string; graph: FileGraph }>();
-  async build(files: SourceFile[]): Promise<FileGraph> {
-    const result: FileGraph = { symbols: [], edges: [], warnings: [] };
+  private cache = new Map<string, { hash: string; graph: SyntaxFileGraph }>();
+  async build(files: SourceFile[]): Promise<SyntaxFileGraph> {
+    const result: SyntaxFileGraph = { symbols: [], edges: [], warnings: [] };
     const paths = new Set(files.map((file) => file.path));
     for (const path of this.cache.keys()) if (!paths.has(path)) this.cache.delete(path);
     for (const file of files) {
-      const language = syntaxLanguage(file.path);
-      if (!language) continue;
-      let cached = this.cache.get(file.path);
-      if (cached?.hash !== file.hash) {
-        let parser = this.parsers.get(language);
-        if (!parser) {
-          parser = await createParser(language);
-          this.parsers.set(language, parser);
-        }
-        cached = { hash: file.hash, graph: fileGraph(file, parser, language) };
-        this.cache.set(file.path, cached);
-      }
-      result.symbols.push(...cached.graph.symbols);
-      result.edges.push(...cached.graph.edges);
-      result.warnings.push(...cached.graph.warnings);
+      const graph = await this.buildFile(file);
+      if (!graph) continue;
+      result.symbols.push(...graph.symbols);
+      result.edges.push(...graph.edges);
+      result.warnings.push(...graph.warnings);
     }
     return result;
+  }
+  async update(
+    changed: SourceFile[],
+    deletedPaths: string[],
+  ): Promise<{ files: Map<string, SyntaxFileGraph> }> {
+    for (const path of deletedPaths) this.cache.delete(path);
+    const files = new Map<string, SyntaxFileGraph>();
+    for (const file of changed) {
+      const graph = await this.buildFile(file);
+      if (graph) files.set(file.path, graph);
+    }
+    return { files };
+  }
+  private async buildFile(file: SourceFile): Promise<SyntaxFileGraph | undefined> {
+    const language = syntaxLanguage(file.path);
+    if (!language) return undefined;
+    let cached = this.cache.get(file.path);
+    if (cached?.hash !== file.hash) {
+      let parser = this.parsers.get(language);
+      if (!parser) {
+        parser = await createParser(language);
+        this.parsers.set(language, parser);
+      }
+      cached = { hash: file.hash, graph: fileGraph(file, parser, language) };
+      this.cache.set(file.path, cached);
+    }
+    return cached.graph;
   }
   close(): void {
     this.cache.clear();
