@@ -113,7 +113,6 @@ function fileGraph(
         .slice(start, body?.startIndex ?? finish)
         .replace(/\s+/g, " ")
         .slice(0, 300);
-      const comment = documentation(item.node);
       const modifiers =
         namedChildren(item.node).find((child) => child.type === "modifiers")?.text ?? "";
       const exported =
@@ -136,7 +135,7 @@ function fileGraph(
         endLine: (item.end ?? item.node).endPosition.row + 1,
         signature,
         excerpt,
-        document: searchDocument([qualifiedName, file.path, signature, comment].join(" ")),
+        document: "",
         parentId: parent?.symbol.id,
         exported,
       };
@@ -146,6 +145,53 @@ function fileGraph(
     };
     for (const item of declarations) entryFor(item);
     const all = [...entries.values()];
+    const ownTextById = new Map<string, string[]>();
+    const ownLenById = new Map<string, number>();
+    const declByNodeId = new Map<number, SyntaxEntry>();
+    for (const entry of all) {
+      if (!declByNodeId.has(entry.declaration.node.id)) {
+        declByNodeId.set(entry.declaration.node.id, entry);
+      }
+      if (entry.declaration.end && !declByNodeId.has(entry.declaration.end.id)) {
+        declByNodeId.set(entry.declaration.end.id, entry);
+      }
+    }
+    const appendOwn = (entry: SyntaxEntry, text: string) => {
+      const id = entry.symbol.id;
+      const len = ownLenById.get(id) ?? 0;
+      if (len >= 8000) return;
+      let parts = ownTextById.get(id);
+      if (!parts) {
+        parts = [];
+        ownTextById.set(id, parts);
+      }
+      parts.push(text);
+      ownLenById.set(id, len + text.length + 1);
+    };
+    const collectOwnText = (node: SyntaxNode, current?: SyntaxEntry): void => {
+      const owner = declByNodeId.get(node.id) ?? current;
+      const type = node.type;
+      if (type.includes("string") || type.includes("comment")) {
+        if (owner) appendOwn(owner, node.text);
+        return;
+      }
+      if (node.childCount === 0) {
+        if (owner && (type.includes("identifier") || type === "type_identifier")) {
+          appendOwn(owner, node.text);
+        }
+        return;
+      }
+      for (const child of namedChildren(node)) collectOwnText(child, owner);
+    };
+    collectOwnText(tree.rootNode);
+    for (const entry of all) {
+      const { symbol, declaration: item } = entry;
+      const own = ownTextById.get(symbol.id)?.join(" ").slice(0, 8000) ?? "";
+      const comment = documentation(item.node);
+      symbol.document = searchDocument(
+        [symbol.name, symbol.qualifiedName, file.path, symbol.signature, comment, own].join(" "),
+      );
+    }
     const edges: GraphEdge[] = all.flatMap((entry) =>
       entry.parent
         ? [

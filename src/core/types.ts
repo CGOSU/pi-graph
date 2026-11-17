@@ -43,10 +43,13 @@ export interface SourceFile {
   absolutePath: string;
   content: string;
   hash: string;
+  stat?: string;
+  contentLoaded?: boolean;
 }
 export interface FileRecord {
   path: string;
   hash: string;
+  stat?: string;
 }
 export interface GraphStatus {
   root: string;

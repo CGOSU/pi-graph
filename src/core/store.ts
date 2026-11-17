@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { unicodeTokens } from "./text.js";
 import type { FileRecord, GraphEdge, GraphSymbol, PublicSymbol } from "./types.js";
 
 interface SymbolRow {
@@ -23,6 +24,12 @@ export interface CommitOptions {
   scopePaths?: string[];
   extraMetadata?: Record<string, string>;
 }
+export interface SearchContext {
+  symbols: GraphSymbol[];
+  docFreqs: Map<string, number>;
+  totalSymbols: number;
+  expansions: Map<string, string[]>;
+}
 function edgeKey(edge: Pick<GraphEdge, "source" | "target" | "kind"> | EdgeRow): string {
   return JSON.stringify([edge.source, edge.target, edge.kind]);
 }
@@ -34,6 +41,38 @@ function encodeSymbol({ document, ...publicSymbol }: GraphSymbol): {
 }
 function decodeSymbol(data: string, document: string): GraphSymbol {
   return { ...(JSON.parse(data) as PublicSymbol), document };
+}
+function isCallableKind(kind: string): number {
+  return kind === "function" || kind === "method" ? 1 : 0;
+}
+function qualifiedAlias(name: string, qualifiedName: string): string | undefined {
+  if (qualifiedName === name || !qualifiedName.includes("::")) return undefined;
+  const parts = qualifiedName.split("::");
+  if (parts.length < 2) return undefined;
+  const tail = parts.slice(-2).join("::");
+  const normalized = tail.replace(/\s+as\s+[^:]+::/, "::");
+  if (normalized !== qualifiedName && normalized !== name && normalized.includes("::"))
+    return normalized;
+  const asIndex = qualifiedName.indexOf(" as ");
+  if (asIndex !== -1) {
+    const typePart = qualifiedName.slice(0, asIndex).split("::").at(-1);
+    const memberPart = qualifiedName.slice(asIndex).split("::").slice(1).join("::");
+    if (typePart && memberPart) {
+      const candidate = `${typePart}::${memberPart}`;
+      if (candidate !== qualifiedName && candidate !== name) return candidate;
+    }
+  }
+  return undefined;
+}
+function escapeFtsTerm(term: string): string {
+  return `"${term.replaceAll('"', '""')}"`;
+}
+function safeMorphologicalSuffix(term: string, candidate: string): boolean {
+  if (candidate === term) return true;
+  if (!candidate.startsWith(term) || candidate.length > term.length + 8) return false;
+  if (term.length >= 5) return true;
+  const suffix = candidate.slice(term.length);
+  return /^(?:s|es|ed|ing|er|ers|d|ly)$/.test(suffix);
 }
 
 const scopePredicate = "s.path=? OR (s.path>=? AND s.path<?)";
@@ -51,8 +90,9 @@ export class GraphStore {
     try {
       this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
       this.db.exec(
-        "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, hash TEXT NOT NULL); CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, path TEXT NOT NULL, data TEXT NOT NULL, document TEXT NOT NULL DEFAULT ''); CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path); CREATE TABLE IF NOT EXISTS edges (source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,target,kind)); CREATE INDEX IF NOT EXISTS edges_target ON edges(target); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(id UNINDEXED, document, tokenize='unicode61');",
+        "CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, hash TEXT NOT NULL, stat TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, path TEXT NOT NULL, data TEXT NOT NULL, document TEXT NOT NULL DEFAULT ''); CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path); CREATE TABLE IF NOT EXISTS edges (source TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(source,target,kind)); CREATE INDEX IF NOT EXISTS edges_target ON edges(target); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(id UNINDEXED, document, tokenize='unicode61'); CREATE VIRTUAL TABLE IF NOT EXISTS documents_vocab USING fts5vocab(documents, col);",
       );
+      this.migrateFilesStat();
       this.migrateSymbolsDocument();
       this.initializeNames();
     } catch (error) {
@@ -68,17 +108,30 @@ export class GraphStore {
     }
     return statement;
   }
-  private hasDocumentColumn(): boolean {
-    const columns = this.prepare("PRAGMA table_info(symbols)").all() as unknown as {
+  private hasColumn(table: string, columnName: string): boolean {
+    const columns = this.prepare(`PRAGMA table_info(${table})`).all() as unknown as {
       name: string;
     }[];
-    return columns.some((column) => column.name === "document");
+    return columns.some((column) => column.name === columnName);
   }
-  private migrateSymbolsDocument(): void {
-    if (this.hasDocumentColumn()) return;
+  private migrateFilesStat(): void {
+    if (this.hasColumn("files", "stat")) return;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      if (!this.hasDocumentColumn()) {
+      if (!this.hasColumn("files", "stat")) {
+        this.db.exec("ALTER TABLE files ADD COLUMN stat TEXT NOT NULL DEFAULT ''");
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  private migrateSymbolsDocument(): void {
+    if (this.hasColumn("symbols", "document")) return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.hasColumn("symbols", "document")) {
         this.db.exec("ALTER TABLE symbols ADD COLUMN document TEXT NOT NULL DEFAULT ''");
         const update = this.prepare("UPDATE symbols SET data=?, document=? WHERE id=?");
         for (const row of this.prepare("SELECT id, data FROM symbols").iterate() as Iterable<{
@@ -103,22 +156,44 @@ export class GraphStore {
     const nameTable = this.prepare(
       "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='symbol_names'",
     );
-    if (nameTable.get()) return;
+    if (!nameTable.get()) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        // A concurrent opener may have already migrated the index while we waited for the lock.
+        if (!nameTable.get()) {
+          this.db.exec(`CREATE TABLE symbol_names (
+            symbol_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            folded_name TEXT NOT NULL,
+            qualified INTEGER NOT NULL,
+            callable INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(symbol_id, qualified)
+          ) WITHOUT ROWID`);
+          for (const row of this.prepare("SELECT data FROM symbols").iterate()) {
+            this.insertNames(JSON.parse(row.data as string) as GraphSymbol);
+          }
+          this.db.exec(
+            "CREATE INDEX symbol_names_folded ON symbol_names(folded_name, qualified DESC, callable DESC, symbol_id, name); CREATE INDEX symbol_names_exact ON symbol_names(name, qualified DESC, callable DESC, symbol_id);",
+          );
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+      return;
+    }
+    if (this.hasColumn("symbol_names", "callable")) return;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      // A concurrent opener may have already migrated the index while we waited for the lock.
-      if (!nameTable.get()) {
-        this.db.exec(`CREATE TABLE symbol_names (
-          symbol_id TEXT NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
-          name TEXT NOT NULL,
-          folded_name TEXT NOT NULL,
-          qualified INTEGER NOT NULL,
-          PRIMARY KEY(symbol_id, qualified)
-        ) WITHOUT ROWID`);
-        for (const row of this.prepare("SELECT data FROM symbols").iterate()) {
-          this.insertNames(JSON.parse(row.data as string) as GraphSymbol);
-        }
-        this.db.exec("CREATE INDEX symbol_names_folded ON symbol_names(folded_name, name)");
+      if (!this.hasColumn("symbol_names", "callable")) {
+        this.db.exec("ALTER TABLE symbol_names ADD COLUMN callable INTEGER NOT NULL DEFAULT 0");
+        this.db.exec(
+          "UPDATE symbol_names SET callable = COALESCE((SELECT CASE WHEN json_extract(s.data,'$.kind') IN ('function','method') THEN 1 ELSE 0 END FROM symbols s WHERE s.id=symbol_names.symbol_id), 0)",
+        );
+        this.db.exec(
+          "DROP INDEX IF EXISTS symbol_names_folded; CREATE INDEX symbol_names_folded ON symbol_names(folded_name, qualified DESC, callable DESC, symbol_id, name); CREATE INDEX IF NOT EXISTS symbol_names_exact ON symbol_names(name, qualified DESC, callable DESC, symbol_id);",
+        );
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -126,15 +201,29 @@ export class GraphStore {
       throw error;
     }
   }
-  private insertNames({ id, name, qualifiedName }: GraphSymbol): void {
+  private insertNames({
+    id,
+    name,
+    qualifiedName,
+    kind,
+  }: Pick<GraphSymbol, "id" | "name" | "qualifiedName" | "kind">): void {
     const insert = this.prepare(
-      "INSERT INTO symbol_names(symbol_id,name,folded_name,qualified) VALUES (?,?,?,?)",
+      "INSERT INTO symbol_names(symbol_id,name,folded_name,qualified,callable) VALUES (?,?,?,?,?)",
     );
-    insert.run(id, name, name.toLowerCase(), 0);
-    if (qualifiedName !== name) insert.run(id, qualifiedName, qualifiedName.toLowerCase(), 1);
+    const callable = isCallableKind(kind);
+    insert.run(id, name, name.toLowerCase(), 0, callable);
+    if (qualifiedName !== name)
+      insert.run(id, qualifiedName, qualifiedName.toLowerCase(), 2, callable);
+    const alias = qualifiedAlias(name, qualifiedName);
+    if (alias) insert.run(id, alias, alias.toLowerCase(), 1, callable);
   }
   files(): FileRecord[] {
-    return this.prepare("SELECT path, hash FROM files").all() as unknown as FileRecord[];
+    return this.prepare("SELECT path, hash, stat FROM files").all() as unknown as FileRecord[];
+  }
+  fileHash(path: string): string | undefined {
+    return (
+      this.prepare("SELECT hash FROM files WHERE path=?").get(path) as { hash: string } | undefined
+    )?.hash;
   }
   metadata(key: string): string | undefined {
     return (
@@ -229,7 +318,8 @@ export class GraphStore {
         const previousSymbol = JSON.parse(previous.data) as PublicSymbol;
         if (
           previousSymbol.name !== symbol.name ||
-          previousSymbol.qualifiedName !== symbol.qualifiedName
+          previousSymbol.qualifiedName !== symbol.qualifiedName ||
+          isCallableKind(previousSymbol.kind) !== isCallableKind(symbol.kind)
         ) {
           removeNames.run(symbol.id);
           this.insertNames(symbol);
@@ -254,15 +344,20 @@ export class GraphStore {
     for (const entry of changedDocuments) addDocument.run(entry.id, entry.document);
   }
   private writeFiles(files: FileRecord[]): void {
-    const old = new Map(this.files().map((file) => [file.path, file.hash]));
-    const add = this.prepare("INSERT INTO files(path,hash) VALUES (?,?)");
-    const update = this.prepare("UPDATE files SET hash=? WHERE path=?");
+    const old = new Map(this.files().map((file) => [file.path, file]));
+    const add = this.prepare("INSERT INTO files(path,hash,stat) VALUES (?,?,?)");
+    const update = this.prepare("UPDATE files SET hash=?,stat=? WHERE path=?");
     const remove = this.prepare("DELETE FROM files WHERE path=?");
     for (const file of files) {
       const previous = old.get(file.path);
       old.delete(file.path);
-      if (previous === undefined) add.run(file.path, file.hash);
-      else if (previous !== file.hash) update.run(file.hash, file.path);
+      const nextStat = file.stat ?? previous?.stat ?? "";
+      if (!previous) add.run(file.path, file.hash, nextStat);
+      else if (
+        previous.hash !== file.hash ||
+        (file.stat !== undefined && previous.stat !== file.stat)
+      )
+        update.run(file.hash, nextStat, file.path);
     }
     for (const path of old.keys()) remove.run(path);
   }
@@ -287,51 +382,348 @@ export class GraphStore {
     for (const edge of old.values()) remove.run(edge.source, edge.target, edge.kind);
   }
   search(terms: string[], scope?: string, identifiers: string[] = []): GraphSymbol[] {
+    return this.searchWithContext(
+      terms.map((term) => [term]),
+      scope,
+      identifiers,
+      false,
+    ).symbols;
+  }
+  searchWithContext(
+    groups: string[][],
+    scope?: string,
+    identifiers: string[] = [],
+    expandPrefixes = true,
+  ): SearchContext {
+    const terms = [...new Set(groups.flat())].slice(0, 32);
+    const totalSymbols =
+      (this.prepare("SELECT COUNT(*) AS count FROM symbols").get() as { count: number } | undefined)
+        ?.count ?? 0;
+    const { docFreqs, expansions } = this.vocabStats(terms, expandPrefixes);
+    const expandedGroups = groups
+      .map((group) => {
+        const out = new Set<string>();
+        for (const term of group) {
+          out.add(term);
+          for (const extra of expansions.get(term) ?? []) out.add(extra);
+        }
+        return [...out];
+      })
+      .filter((group) => group.length);
+
     const symbols = new Map<string, GraphSymbol>();
-    const rows = [...this.searchText(terms, scope), ...this.searchNames(terms, identifiers, scope)];
-    for (const row of rows) {
+    if (scope !== undefined) {
+      const bounds = scopeBounds(scope);
+      const probe = this.prepare(`SELECT 1 FROM symbols s WHERE ${scopePredicate} LIMIT 2501`).all(
+        ...bounds,
+      );
+      if (probe.length === 0) {
+        return { symbols: [], docFreqs, totalSymbols, expansions };
+      }
+      if (probe.length <= 2500 && terms.every((term) => /^[\p{L}\p{N}_-]+$/u.test(term))) {
+        const scopedRows = this.prepare(
+          `SELECT id,data,document FROM symbols s WHERE ${scopePredicate}`,
+        ).all(...bounds) as unknown as SymbolRow[];
+        return {
+          symbols: this.searchScopedInMemory(
+            scopedRows,
+            expandedGroups,
+            terms,
+            identifiers,
+            docFreqs,
+            totalSymbols,
+          ),
+          docFreqs,
+          totalSymbols,
+          expansions,
+        };
+      }
+    }
+
+    const textRows = this.searchText(expandedGroups, scope, docFreqs);
+    const nameRows = this.searchNames(terms, identifiers, scope);
+    for (const row of [...textRows, ...nameRows]) {
       if (symbols.has(row.id)) continue;
       symbols.set(row.id, decodeSymbol(row.data, row.document));
     }
-    return [...symbols.values()];
+    return { symbols: [...symbols.values()], docFreqs, totalSymbols, expansions };
   }
-  private searchText(terms: string[], scope?: string): SymbolRow[] {
-    if (!terms.length) return [];
-    const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
-    // With a scope, FTS rank can sort the entire corpus before the path filter fills the limit.
+  private vocabStats(
+    terms: string[],
+    expandPrefixes: boolean,
+  ): { docFreqs: Map<string, number>; expansions: Map<string, string[]> } {
+    const docFreqs = new Map<string, number>();
+    const expansions = new Map<string, string[]>();
+    if (!terms.length) return { docFreqs, expansions };
+    const normalized = [...new Set(terms.map((term) => term.toLowerCase()))];
+    const rows = this.prepare(
+      "SELECT term, doc FROM documents_vocab WHERE term IN (SELECT value FROM json_each(?))",
+    ).all(JSON.stringify(normalized)) as unknown as { term: string; doc: number }[];
+    for (const row of rows) docFreqs.set(row.term, row.doc);
+
+    if (expandPrefixes) {
+      const rangeStmt = this.prepare(
+        "SELECT term, doc FROM documents_vocab WHERE term >= ? AND term < ? LIMIT 8",
+      );
+      for (const term of normalized) {
+        if (!/^[a-z]{4,}$/.test(term)) continue;
+        const last = term.charCodeAt(term.length - 1);
+        const upper = term.slice(0, -1) + String.fromCharCode(last + 1);
+        const matches = rangeStmt.all(term, upper) as unknown as { term: string; doc: number }[];
+        const variants: string[] = [];
+        for (const match of matches) {
+          if (match.term === term) continue;
+          if (!safeMorphologicalSuffix(term, match.term)) continue;
+          variants.push(match.term);
+          if (!docFreqs.has(match.term)) docFreqs.set(match.term, match.doc);
+        }
+        if (variants.length) expansions.set(term, variants);
+      }
+    }
+    return { docFreqs, expansions };
+  }
+  private searchScopedInMemory(
+    rows: SymbolRow[],
+    groups: string[][],
+    terms: string[],
+    identifiers: string[],
+    docFreqs: Map<string, number>,
+    totalSymbols: number,
+  ): GraphSymbol[] {
+    const decoded = new Map<string, GraphSymbol>();
+    const decodeRow = (row: SymbolRow): GraphSymbol => {
+      let sym = decoded.get(row.id);
+      if (!sym) {
+        sym = decodeSymbol(row.data, row.document);
+        decoded.set(row.id, sym);
+      }
+      return sym;
+    };
+    const textScored: { symbol: GraphSymbol; score: number }[] = [];
+    const activeGroups = groups
+      .map((group) => group.flatMap((term) => unicodeTokens(term)).filter(Boolean))
+      .filter((group) => group.length > 0);
+    if (activeGroups.length) {
+      const flatNeedles = [...new Set(activeGroups.flat())];
+      for (const row of rows) {
+        const docLower = row.document.toLowerCase();
+        if (!flatNeedles.some((needle) => docLower.includes(needle))) continue;
+        const docTokens = new Set(
+          // Fast path for pre-tokenized ASCII documents without combining marks.
+          /[^\x20-\x7e]/.test(row.document)
+            ? unicodeTokens(row.document)
+            : docLower.split(/[^a-z0-9]+/).filter(Boolean),
+        );
+        let hits = 0;
+        let weight = 0;
+        for (const group of activeGroups) {
+          const hit = group.find((word) => docTokens.has(word));
+          if (!hit) continue;
+          hits++;
+          const df = docFreqs.get(hit) ?? 1;
+          weight += Math.log2(1 + Math.max(1, totalSymbols) / (1 + df));
+        }
+        if (hits > 0) {
+          const lengthNorm = 1 / Math.sqrt(Math.max(4, docTokens.size));
+          textScored.push({ symbol: decodeRow(row), score: hits * 10 + weight * lengthNorm });
+        }
+      }
+      textScored.sort((a, b) => b.score - a.score || a.symbol.id.localeCompare(b.symbol.id));
+    }
+
+    const identSet = new Set(identifiers);
+    const foldedSet = new Set(identifiers.map((name) => name.toLowerCase()));
+    const hintSet = new Set(terms.slice(0, 32).map((term) => term.toLowerCase()));
+    const nameScored: { symbol: GraphSymbol; priority: number; callable: number }[] = [];
+    if (identSet.size || hintSet.size) {
+      for (const row of rows) {
+        const symbol = decodeRow(row);
+        const tail = qualifiedAlias(symbol.name, symbol.qualifiedName);
+        let priority = -1;
+        if (symbol.qualifiedName !== symbol.name && identSet.has(symbol.qualifiedName))
+          priority = 6;
+        else if (tail && identSet.has(tail)) priority = 5;
+        else if (identSet.has(symbol.name)) priority = 4;
+        else if (
+          symbol.qualifiedName !== symbol.name &&
+          foldedSet.has(symbol.qualifiedName.toLowerCase())
+        )
+          priority = 3;
+        else if (tail && foldedSet.has(tail.toLowerCase())) priority = 2;
+        else if (foldedSet.has(symbol.name.toLowerCase())) priority = 1;
+        else if (
+          hintSet.has(symbol.name.toLowerCase()) ||
+          hintSet.has(symbol.qualifiedName.toLowerCase()) ||
+          (tail && hintSet.has(tail.toLowerCase()))
+        )
+          priority = 0;
+        if (priority >= 0) {
+          nameScored.push({ symbol, priority, callable: isCallableKind(symbol.kind) });
+        }
+      }
+      nameScored.sort(
+        (a, b) =>
+          b.priority - a.priority ||
+          b.callable - a.callable ||
+          (a.symbol.id < b.symbol.id ? -1 : a.symbol.id > b.symbol.id ? 1 : 0),
+      );
+    }
+
+    const result = new Map<string, GraphSymbol>();
+    for (const item of textScored.slice(0, 80)) result.set(item.symbol.id, item.symbol);
+    for (const item of nameScored.slice(0, 40)) {
+      if (!result.has(item.symbol.id)) result.set(item.symbol.id, item.symbol);
+    }
+    return [...result.values()];
+  }
+  private searchText(
+    groups: string[][],
+    scope: string | undefined,
+    docFreqs: Map<string, number>,
+  ): SymbolRow[] {
+    const presentGroups = groups
+      .map((group) =>
+        group.filter((term) => {
+          const normalized = term.toLowerCase();
+          return !/^[\p{L}\p{N}]+$/u.test(normalized) || (docFreqs.get(normalized) ?? 0) > 0;
+        }),
+      )
+      .filter((group) => group.length > 0);
+    if (!presentGroups.length) return [];
+
     const scopeFilter = scope ? ` AND (${scopePredicate})` : "";
     const order = scope ? "bm25(documents)" : "d.rank";
-    return this.prepare(
+    const queryFts = this.prepare(
       `SELECT s.id,s.data,s.document FROM documents d JOIN symbols s ON s.id=d.id
        WHERE documents MATCH ?${scopeFilter} ORDER BY ${order} LIMIT 80`,
-    ).all(match, ...(scope ? scopeBounds(scope) : [])) as unknown as SymbolRow[];
+    );
+    const bounds = scope ? scopeBounds(scope) : [];
+
+    const collected = new Map<string, SymbolRow>();
+    if (presentGroups.length >= 2) {
+      const rankedGroups = [...presentGroups]
+        .map((group) => ({
+          group,
+          minDoc: Math.min(
+            ...group.map((term) => docFreqs.get(term.toLowerCase()) ?? Number.MAX_SAFE_INTEGER),
+          ),
+        }))
+        .sort((a, b) => a.minDoc - b.minDoc);
+      const topGroups = rankedGroups.slice(
+        0,
+        rankedGroups.length >= 3 && (rankedGroups[2]?.minDoc ?? 0) <= 500 ? 3 : 2,
+      );
+      const andExpr = topGroups
+        .map(({ group }) => `(${group.map(escapeFtsTerm).join(" OR ")})`)
+        .join(" AND ");
+      for (const row of queryFts.all(andExpr, ...bounds) as unknown as SymbolRow[]) {
+        collected.set(row.id, row);
+      }
+      if (collected.size >= 80) return [...collected.values()];
+    }
+
+    const allTerms = [...new Set(presentGroups.flat())];
+    const orExpr = allTerms.map(escapeFtsTerm).join(" OR ");
+    for (const row of queryFts.all(orExpr, ...bounds) as unknown as SymbolRow[]) {
+      if (!collected.has(row.id)) {
+        collected.set(row.id, row);
+        if (collected.size >= 80) break;
+      }
+    }
+    return [...collected.values()];
   }
   private searchNames(terms: string[], identifiers: string[], scope?: string): SymbolRow[] {
     if (!terms.length && !identifiers.length) return [];
     const foldedNames = identifiers.map((name) => name.toLowerCase());
     const hints = terms.slice(0, 32).map((term) => term.toLowerCase());
+    if (!scope && identifiers.length <= 16 && hints.length <= 32) {
+      return this.searchNamesFast(identifiers, foldedNames, hints);
+    }
     const foldedCandidates = [...new Set([...foldedNames, ...hints])];
     const scopeFilter = scope ? ` WHERE ${scopePredicate}` : "";
     return this.prepare(
       `WITH matches AS (
          SELECT symbol_id, max(CASE
-           WHEN name IN (SELECT value FROM json_each(?)) THEN 3 + qualified
+           WHEN name IN (SELECT value FROM json_each(?)) THEN 4 + qualified
            WHEN folded_name IN (SELECT value FROM json_each(?)) THEN 1 + qualified
-           ELSE 0 END) AS priority
+           ELSE 0 END) AS priority,
+           max(callable) AS callable
          FROM symbol_names
          WHERE folded_name IN (SELECT value FROM json_each(?))
          GROUP BY symbol_id
        )
        SELECT s.id,s.data,s.document FROM matches JOIN symbols s ON s.id=matches.symbol_id${scopeFilter}
-       ORDER BY matches.priority DESC,
-         CASE json_extract(s.data,'$.kind') WHEN 'function' THEN 0 WHEN 'method' THEN 0 ELSE 1 END,
-         s.id LIMIT 40`,
+       ORDER BY matches.priority DESC, matches.callable DESC, s.id LIMIT 40`,
     ).all(
       JSON.stringify(identifiers),
       JSON.stringify(foldedNames),
       JSON.stringify(foldedCandidates),
       ...(scope ? scopeBounds(scope) : []),
     ) as unknown as SymbolRow[];
+  }
+  private searchNamesFast(
+    identifiers: string[],
+    foldedNames: string[],
+    hints: string[],
+  ): SymbolRow[] {
+    const byId = new Map<string, { priority: number; callable: number }>();
+    const record = (symbolId: string, priority: number, callable: number) => {
+      const existing = byId.get(symbolId);
+      if (!existing || priority > existing.priority) byId.set(symbolId, { priority, callable });
+    };
+    const exactStmt = this.prepare(
+      "SELECT symbol_id, qualified, callable FROM symbol_names WHERE name=? ORDER BY qualified DESC, callable DESC, symbol_id LIMIT 40",
+    );
+    for (const ident of identifiers) {
+      const rows = exactStmt.all(ident) as unknown as {
+        symbol_id: string;
+        qualified: number;
+        callable: number;
+      }[];
+      for (const row of rows) record(row.symbol_id, 4 + row.qualified, row.callable);
+    }
+    const foldedStmt = this.prepare(
+      "SELECT symbol_id, qualified, callable FROM symbol_names WHERE folded_name=? ORDER BY qualified DESC, callable DESC, symbol_id LIMIT 40",
+    );
+    for (const folded of new Set(foldedNames)) {
+      const rows = foldedStmt.all(folded) as unknown as {
+        symbol_id: string;
+        qualified: number;
+        callable: number;
+      }[];
+      for (const row of rows) record(row.symbol_id, 1 + row.qualified, row.callable);
+    }
+    if (byId.size < 40) {
+      const foldedSet = new Set(foldedNames);
+      const hintTierStmt = this.prepare(
+        "SELECT symbol_id, callable FROM symbol_names WHERE folded_name=? AND qualified=? ORDER BY callable DESC, symbol_id LIMIT 40",
+      );
+      for (const hint of new Set(hints)) {
+        if (foldedSet.has(hint)) continue;
+        for (const qualified of [0, 1, 2] as const) {
+          const rows = hintTierStmt.all(hint, qualified) as unknown as {
+            symbol_id: string;
+            callable: number;
+          }[];
+          for (const row of rows) record(row.symbol_id, 0, row.callable);
+        }
+      }
+    }
+    const ranked = [...byId.entries()]
+      .sort(
+        (a, b) =>
+          b[1].priority - a[1].priority ||
+          b[1].callable - a[1].callable ||
+          (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0),
+      )
+      .slice(0, 40)
+      .map(([id]) => id);
+    if (!ranked.length) return [];
+    const fetched = this.prepare(
+      "SELECT id,data,document FROM symbols WHERE id IN (SELECT value FROM json_each(?))",
+    ).all(JSON.stringify(ranked)) as unknown as SymbolRow[];
+    const rowMap = new Map(fetched.map((row) => [row.id, row]));
+    return ranked.map((id) => rowMap.get(id)).filter((row): row is SymbolRow => Boolean(row));
   }
   containers(ids: string[]): GraphEdge[] {
     if (!ids.length) return [];

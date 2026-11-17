@@ -315,3 +315,51 @@ test("watched snapshots reconcile ignore rules, directory renames and branch cha
     await f.cleanup();
   }
 });
+
+test("reopening an indexed workspace skips unchanged file reads until inspect", async () => {
+  const f = await fixture({
+    "src/alpha.rs": "pub fn alpha_reopen_target() -> i32 { 11 }\n",
+    "src/beta.rs": "pub fn beta_reopen_other() -> i32 { 22 }\n",
+  });
+  const firstWorker = await watchedWorker(f.root);
+  try {
+    const initial = (await firstWorker.request("status")) as GraphStatus;
+    assert.equal(initial.files, 2);
+  } finally {
+    await firstWorker.close();
+  }
+
+  const reopened = await watchedWorker(f.root);
+  try {
+    const status = (await reopened.request("status")) as GraphStatus;
+    assert.equal(status.files, 2);
+    assert.equal(
+      (await reopened.control()).reads,
+      0,
+      "reopen status must skip reading unchanged files matching stored stats",
+    );
+
+    const located = (await reopened.request("locate", {
+      query: "alpha_reopen_target",
+    })) as LocateResult;
+    assert.equal(located.results[0]?.name, "alpha_reopen_target");
+    assert.equal(
+      (await reopened.control()).reads,
+      0,
+      "locate must answer from SQLite without reading source files",
+    );
+
+    const detail = (await reopened.request("inspect", { id: located.results[0]?.id })) as {
+      source: string;
+    };
+    assert(detail.source.includes("11"));
+    assert.equal(
+      (await reopened.control()).reads,
+      1,
+      "inspect must hydrate only the requested file on demand",
+    );
+  } finally {
+    await reopened.close();
+    await f.cleanup();
+  }
+});

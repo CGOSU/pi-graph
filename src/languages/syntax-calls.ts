@@ -42,20 +42,54 @@ function anonymousScope(call: Call, owner: SyntaxEntry): boolean {
   }
   return false;
 }
-function nearestEnclosing(entries: SyntaxEntry[], node: SyntaxNode): SyntaxEntry | undefined {
-  let best: SyntaxEntry | undefined;
-  let bestSpan = Number.POSITIVE_INFINITY;
-  for (const entry of entries) {
-    if (entry.symbol.start > node.startIndex) break;
-    if (node.endIndex <= entry.symbol.end) {
+function enclosingResolver(entries: SyntaxEntry[]): (node: SyntaxNode) => SyntaxEntry | undefined {
+  if (!entries.length) return () => undefined;
+  const active: SyntaxEntry[] = [];
+  let cursor = 0;
+  let lastStart = -1;
+  return (node: SyntaxNode): SyntaxEntry | undefined => {
+    const start = node.startIndex;
+    const end = node.endIndex;
+    if (start < lastStart) {
+      let best: SyntaxEntry | undefined;
+      let bestSpan = Number.POSITIVE_INFINITY;
+      for (const entry of entries) {
+        if (entry.symbol.start > start) break;
+        if (end <= entry.symbol.end) {
+          const span = entry.symbol.end - entry.symbol.start;
+          if (span < bestSpan) {
+            best = entry;
+            bestSpan = span;
+          }
+        }
+      }
+      return best;
+    }
+    lastStart = start;
+    while (cursor < entries.length) {
+      const next = entries[cursor];
+      if (!next || next.symbol.start > start) break;
+      if (next.symbol.end >= start) active.push(next);
+      cursor++;
+    }
+    while (active.length) {
+      const top = active[active.length - 1];
+      if (!top || top.symbol.end >= start) break;
+      active.pop();
+    }
+    let best: SyntaxEntry | undefined;
+    let bestSpan = Number.POSITIVE_INFINITY;
+    for (let i = active.length - 1; i >= 0; i--) {
+      const entry = active[i];
+      if (!entry || end > entry.symbol.end) continue;
       const span = entry.symbol.end - entry.symbol.start;
       if (span < bestSpan) {
         best = entry;
         bestSpan = span;
       }
     }
-  }
-  return best;
+    return best;
+  };
 }
 export function syntaxCalls(
   nodes: SyntaxNode[],
@@ -63,13 +97,17 @@ export function syntaxCalls(
   adapter: SyntaxAdapter,
   language: SyntaxLanguage,
 ): GraphEdge[] {
-  const sortedFunctions = entries.filter(callable).sort((a, b) => a.symbol.start - b.symbol.start);
+  const byInterval = (a: SyntaxEntry, b: SyntaxEntry) =>
+    a.symbol.start - b.symbol.start || b.symbol.end - a.symbol.end;
+  const sortedFunctions = entries.filter(callable).sort(byInterval);
   const sortedOwners = entries
     .filter(
       (entry) =>
         callable(entry) || ["class", "struct", "interface", "enum"].includes(entry.symbol.kind),
     )
-    .sort((a, b) => a.symbol.start - b.symbol.start);
+    .sort(byInterval);
+  const nearestOwner = enclosingResolver(sortedOwners);
+  const nearestFunction = enclosingResolver(sortedFunctions);
   const functionsByName = new Map<string, SyntaxEntry[]>();
   for (const entry of sortedFunctions) {
     const bucket = functionsByName.get(entry.symbol.name) ?? [];
@@ -83,7 +121,7 @@ export function syntaxCalls(
   for (const node of nodes) {
     const names = adapter.bindings(node);
     if (!names.length) continue;
-    const owner = nearestEnclosing(sortedOwners, node);
+    const owner = nearestOwner(node);
     const scope = lexicalScope(node);
     const parameter = node.type.includes("parameter");
     for (const name of names) {
@@ -96,7 +134,7 @@ export function syntaxCalls(
   for (const node of nodes) {
     const call = adapter.call(node);
     if (!call) continue;
-    const owner = nearestEnclosing(sortedFunctions, node);
+    const owner = nearestFunction(node);
     if (!owner || anonymousScope(call, owner)) continue;
     const chain = ancestors(owner);
     const shadowed = (name: string) =>

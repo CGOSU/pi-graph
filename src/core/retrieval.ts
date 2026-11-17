@@ -22,37 +22,146 @@ interface Candidate {
 function inScope(symbol: GraphSymbol, scope?: string): boolean {
   return !scope || symbol.path === scope || symbol.path.startsWith(`${scope}/`);
 }
+function isTestPath(path: string): boolean {
+  return /(?:^|[/._-])(?:test|tests|spec)(?:[/._-]|$)/i.test(path);
+}
 interface MatchQuery {
   groups: string[][];
   identifiers: Set<string>;
   foldedIdentifiers: Set<string>;
+  docFreqs: ReadonlyMap<string, number>;
+  totalSymbols: number;
+  expansions: ReadonlyMap<string, string[]>;
+  preferProduction: boolean;
 }
-function relevance(symbol: GraphSymbol, { groups, identifiers, foldedIdentifiers }: MatchQuery) {
+function qualifiedAliasMatch(
+  qualifiedName: string,
+  name: string,
+  identifiers: ReadonlySet<string>,
+  foldedIdentifiers: ReadonlySet<string>,
+): number {
+  if (qualifiedName === name || !qualifiedName.includes("::")) return 0;
+  const parts = qualifiedName.split("::");
+  if (parts.length < 2) return 0;
+  const normalized = parts
+    .slice(-2)
+    .join("::")
+    .replace(/\s+as\s+[^:]+::/, "::");
+  if (normalized === qualifiedName || normalized === name) {
+    const asIndex = qualifiedName.indexOf(" as ");
+    if (asIndex === -1) return 0;
+    const typePart = qualifiedName.slice(0, asIndex).split("::").at(-1);
+    const memberPart = qualifiedName.slice(asIndex).split("::").slice(1).join("::");
+    const traitTarget = typePart && memberPart ? `${typePart}::${memberPart}` : "";
+    if (!traitTarget) return 0;
+    if (identifiers.has(traitTarget)) return 5;
+    return foldedIdentifiers.has(traitTarget.toLowerCase()) ? 2 : 0;
+  }
+  if (identifiers.has(normalized)) return 5;
+  return foldedIdentifiers.has(normalized.toLowerCase()) ? 2 : 0;
+}
+function fullNameMatch(
+  symbol: Pick<GraphSymbol, "name" | "qualifiedName">,
+  identifiers: ReadonlySet<string>,
+  foldedIdentifiers: ReadonlySet<string>,
+): number {
+  const base = nameMatch(symbol, identifiers, foldedIdentifiers);
+  // Map base levels (4/3/2/1) onto 6/4/3/1 while giving stripped :: tails levels 5/2.
+  const mapped = base === 4 ? 6 : base === 3 ? 4 : base === 2 ? 3 : base === 1 ? 1 : 0;
+  if (mapped >= 6) return mapped;
+  return Math.max(
+    mapped,
+    qualifiedAliasMatch(symbol.qualifiedName, symbol.name, identifiers, foldedIdentifiers),
+  );
+}
+function relevance(
+  symbol: GraphSymbol,
+  {
+    groups,
+    identifiers,
+    foldedIdentifiers,
+    docFreqs,
+    totalSymbols,
+    expansions,
+    preferProduction,
+  }: MatchQuery,
+) {
   const names = new Set(tokens(symbol.name));
-  const document = new Set(symbol.document.split(" "));
+  const qualifiedNames =
+    symbol.qualifiedName !== symbol.name ? new Set(tokens(symbol.qualifiedName)) : names;
+  const document = new Set(symbol.document ? symbol.document.split(" ") : []);
   const path = new Set(tokens(symbol.path));
   const bodyWeight = 1.5 / (1 + Math.log2(Math.max(1, document.size / 32)));
   const matched: string[] = [];
   let value = 0;
+  const findHit = (
+    group: string[],
+    target: Set<string>,
+    exactOnly: boolean,
+  ): string | undefined => {
+    for (const word of group) {
+      if (target.has(word)) return word;
+      if (!exactOnly) {
+        const variants = expansions.get(word);
+        if (variants) {
+          const hit = variants.find((variant) => target.has(variant));
+          if (hit) return hit;
+        }
+      }
+    }
+    return undefined;
+  };
   for (const group of groups) {
-    const term =
-      group.find((word) => names.has(word)) ??
-      group.find((word) => document.has(word)) ??
-      group.find((word) => path.has(word));
+    let factor = 1;
+    let term = findHit(group, names, true);
+    let baseScore = 5;
+    if (!term) {
+      term = findHit(group, qualifiedNames, true);
+      baseScore = 2.5;
+    }
+    if (!term) {
+      term = findHit(group, document, true);
+      baseScore = bodyWeight;
+    }
+    if (!term) {
+      term = findHit(group, path, true);
+      baseScore = 0.5;
+    }
+    if (!term) {
+      factor = 0.8;
+      term = findHit(group, names, false);
+      baseScore = 5;
+      if (!term) {
+        term = findHit(group, qualifiedNames, false);
+        baseScore = 2.5;
+      }
+      if (!term) {
+        term = findHit(group, document, false);
+        baseScore = bodyWeight;
+      }
+    }
     if (!term) continue;
     matched.push(term);
-    value += names.has(term) ? 5 : document.has(term) ? bodyWeight : 0.5;
+    let idf = 1;
+    if (totalSymbols >= 20) {
+      const df = docFreqs.get(term.toLowerCase()) ?? 1;
+      idf = Math.min(2.2, Math.max(0.55, Math.log2(1 + totalSymbols / (1 + df)) / 4));
+    }
+    value += baseScore * factor * idf;
   }
   // Shared concepts should outweigh an isolated name hit, even in a long prose query.
   value *= matched.length;
   if (symbol.kind === "interface" || symbol.kind === "type") value *= 0.65;
+  else if (symbol.kind === "class" || symbol.kind === "struct" || symbol.kind === "module")
+    value *= 0.85;
+  if (preferProduction && isTestPath(symbol.path)) value *= 0.45;
   const confidence = value;
-  const namePriority = nameMatch(symbol, identifiers, foldedIdentifiers);
+  const namePriority = fullNameMatch(symbol, identifiers, foldedIdentifiers);
   const reasons: string[] = [];
   if (namePriority) {
     // Exceed the maximum lexical score plus its bounded 20% graph boost.
     value += Math.max(20, 6 * groups.length ** 2);
-    reasons.push(namePriority >= 3 ? "Exact name" : "Name matched ignoring case");
+    reasons.push(namePriority >= 4 ? "Exact name" : "Name matched ignoring case");
   }
   if (matched.length) reasons.push(`Matched: ${matched.slice(0, 5).join(", ")}`);
   return { value, confidence, namePriority, reason: reasons.join("; ") };
@@ -73,6 +182,9 @@ function groupLocalEvidence(
   const owners = store.symbols([...new Set(edges.map((edge) => edge.source))]);
   const evidence = new Map<string, { symbol: GraphSymbol; words: Set<string>; edge: GraphEdge }>();
   const terms = new Set(query.groups.flat());
+  for (const term of [...terms]) {
+    for (const extra of query.expansions.get(term) ?? []) terms.add(extra);
+  }
   const grouped = new Set<string>();
   for (const edge of edges) {
     const local = candidates.get(edge.target)?.symbol;
@@ -151,10 +263,23 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
     .map((group) => group.filter((term) => terms.includes(term)))
     .filter((group) => group.length);
   const identifiers = extractIdentifiers(input.query);
-  const query = {
+  const preferProduction =
+    !(scope && isTestPath(scope)) &&
+    !/\b(?:test|tests|spec|specs)\b|测试|用例|单测/iu.test(input.query);
+  const {
+    symbols: searchHits,
+    docFreqs,
+    totalSymbols,
+    expansions,
+  } = store.searchWithContext(activeGroups, scope, identifiers);
+  const query: MatchQuery = {
     groups: activeGroups,
     identifiers: new Set(identifiers),
     foldedIdentifiers: new Set(identifiers.map((name) => name.toLowerCase())),
+    docFreqs,
+    totalSymbols,
+    expansions,
+    preferProduction,
   };
   const scores = new Map<string, ReturnType<typeof relevance>>();
   const scored = (symbol: GraphSymbol) => {
@@ -166,7 +291,7 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
     return result;
   };
   const candidates = new Map<string, Candidate>();
-  for (const symbol of store.search(terms, scope, identifiers)) {
+  for (const symbol of searchHits) {
     const match = scored(symbol);
     candidates.set(symbol.id, {
       symbol,
@@ -215,15 +340,20 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
         Math.max(1.5, match.confidence * 0.2),
       );
       const previous = candidates.get(otherId);
-      if (!previous || previous.score < direct + boost)
+      if (!previous || previous.score < direct + boost) {
+        const relationLabel =
+          edge.target === seed.symbol.id
+            ? `${edge.kind} ${seed.symbol.qualifiedName}`
+            : `${edge.kind === "calls" ? "called by" : edge.kind === "references" ? "referenced by" : "contained in"} ${seed.symbol.qualifiedName}`;
         candidates.set(otherId, {
           symbol,
           score: direct + boost,
           confidence: match.confidence,
           namePriority: match.namePriority,
-          reason: `${direct ? `${match.reason}; ` : ""}${edge.kind} ${seed.symbol.qualifiedName} (${edge.evidence})`,
+          reason: `${direct ? `${match.reason}; ` : ""}${relationLabel} (${edge.evidence})`,
           edge,
         });
+      }
     }
   }
   if (activeGroups.length > 1 && !/\b(?:variables?|fields?)\b|变量|字段/iu.test(input.query))
@@ -232,8 +362,8 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
   const remaining = [...candidates.values()];
   // Name matches rank independently from lexical confidence.
   const minimumConfidence = Math.max(
-    1.4,
-    ...remaining.map((candidate) => candidate.confidence * 0.12),
+    1.2,
+    ...remaining.map((candidate) => candidate.confidence * 0.08),
   );
   while (selected.length < limit && remaining.length) {
     const adjusted = (candidate: Candidate, score: number): number => {
@@ -258,7 +388,7 @@ export function locate(store: GraphStore, input: LocateInput, warnings: string[]
     );
     const next = remaining.shift();
     if (!next) break;
-    if (!next.namePriority && adjusted(next, next.confidence) < minimumConfidence) continue;
+    if (!next.namePriority && next.confidence < minimumConfidence) continue;
     selected.push(next);
   }
   const ids = new Set(selected.map((candidate) => candidate.symbol.id));

@@ -1,5 +1,8 @@
 import type { GraphSymbol } from "./types.js";
 
+const fileExtensionPattern =
+  /\.(?:[cm]?[jt]sx?|rs|vue|astro|dart|go|kts?|json|md|ya?ml|toml|sql|sqlite|css|scss|html)$/i;
+
 export function extractIdentifiers(query: string): string[] {
   const trimmed = query.trim();
   const words =
@@ -10,7 +13,9 @@ export function extractIdentifiers(query: string): string[] {
     ...new Set(
       words.filter(
         (word) =>
-          word === trimmed || /[._$]|::|\p{Ll}\p{Lu}/u.test(word) || /^\p{Lu}.*\p{Ll}/u.test(word),
+          word === trimmed ||
+          (!fileExtensionPattern.test(word) &&
+            (/[._$]|::|\p{Ll}\p{Lu}/u.test(word) || /^\p{Lu}.*\p{Ll}/u.test(word))),
       ),
     ),
   ];

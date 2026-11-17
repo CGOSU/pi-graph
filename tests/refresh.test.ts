@@ -261,3 +261,61 @@ test("single-domain edits skip unrelated language builders and preserve untouche
     await f.cleanup();
   }
 });
+
+test("tsconfig changes rebuild only the TypeScript domain", async (t) => {
+  const f = await fixture({
+    "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2022", strict: false } }),
+    "app.ts": "export function tsTarget(): number { return 1; }\n",
+    "lib.rs": "pub fn rust_keep() -> i32 { 2 }\n",
+    "main.go": "package main\nfunc goKeep() int { return 3 }\n",
+  });
+  try {
+    await f.engine.refresh();
+
+    let tsCalls = 0;
+    let rustCalls = 0;
+    let syntaxCalls = 0;
+    const tsBuild = TypeScriptGraph.prototype.build;
+    const rustBuild = RustGraph.prototype.build;
+    const syntaxUpdate = SyntaxGraph.prototype.update;
+
+    t.mock.method(
+      TypeScriptGraph.prototype,
+      "build",
+      function (this: TypeScriptGraph, ...args: Parameters<TypeScriptGraph["build"]>) {
+        tsCalls++;
+        return tsBuild.apply(this, args);
+      },
+    );
+    t.mock.method(
+      RustGraph.prototype,
+      "build",
+      function (this: RustGraph, ...args: Parameters<RustGraph["build"]>) {
+        rustCalls++;
+        return rustBuild.apply(this, args);
+      },
+    );
+    t.mock.method(
+      SyntaxGraph.prototype,
+      "update",
+      function (this: SyntaxGraph, ...args: Parameters<SyntaxGraph["update"]>) {
+        syntaxCalls++;
+        return syntaxUpdate.apply(this, args);
+      },
+    );
+
+    await f.write(
+      "tsconfig.json",
+      JSON.stringify({ compilerOptions: { target: "ES2023", strict: true } }),
+    );
+    await f.engine.refresh();
+    assert.equal(tsCalls, 1);
+    assert.equal(rustCalls, 0);
+    assert.equal(syntaxCalls, 0);
+    assert.equal((await f.engine.locate({ query: "tsTarget" })).results[0]?.name, "tsTarget");
+    assert.equal((await f.engine.locate({ query: "rust_keep" })).results[0]?.name, "rust_keep");
+    assert.equal((await f.engine.locate({ query: "goKeep" })).results[0]?.name, "goKeep");
+  } finally {
+    await f.cleanup();
+  }
+});

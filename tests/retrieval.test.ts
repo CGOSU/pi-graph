@@ -123,3 +123,137 @@ test("behavior grouping preserves top-level state and local closures", async () 
     await f.cleanup();
   }
 });
+
+test("syntax parsers index Dart, Go, and Kotlin function bodies via ownText", async () => {
+  const f = await fixture({
+    "worker.dart": `class FrameRouter {
+      void dispatchOuter() {}
+      String compileRoute() {
+        return sendHeartbeatPacket("heartbeat_frame");
+      }
+    }`,
+    "worker.go": `package worker
+    func handleFrame() string {
+      return sendHeartbeatPacket("heartbeat_frame")
+    }`,
+    "worker.kt": `class KotlinRouter {
+      fun buildFrame(): String {
+        return sendHeartbeatPacket("heartbeat_frame")
+      }
+    }`,
+  });
+  try {
+    const result = await f.engine.locate({
+      query: "heartbeat_frame sendHeartbeatPacket",
+      limit: 10,
+    });
+    const names = result.results.map((symbol) => symbol.name);
+    assert(
+      names.includes("FrameRouter.compileRoute"),
+      `missing Dart method in ${names.join(", ")}`,
+    );
+    assert(names.includes("handleFrame"), `missing Go func in ${names.join(", ")}`);
+    assert(
+      names.includes("KotlinRouter.buildFrame"),
+      `missing Kotlin method in ${names.join(", ")}`,
+    );
+    assert(!names.includes("FrameRouter.dispatchOuter"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("locate neighbor reasons preserve call edge direction and nested methods survive container overlap", async () => {
+  const f = await fixture({
+    "caller.ts": `import { helperTarget } from "./callee.js";
+    export function callerAlpha(): string {
+      const dispatchTag = "dispatchTag";
+      return helperTarget() + dispatchTag;
+    }`,
+    "callee.ts": `export function helperTarget(): string {
+      return "sharedDispatchToken";
+    }`,
+    "service.ts": `export class PipelineService {
+      executePlan(): string {
+        return "pipeline checkpoint execute token";
+      }
+      run(): string {
+        return "pipeline checkpoint execute token";
+      }
+    }`,
+  });
+  try {
+    const fromCaller = await f.engine.locate({
+      query: "callerAlpha sharedDispatchToken",
+      limit: 6,
+    });
+    const targetHit = fromCaller.results.find((symbol) => symbol.name === "helperTarget");
+    assert(targetHit);
+    assert(
+      targetHit.reason.includes("called by callerAlpha"),
+      `unexpected target reason: ${targetHit.reason}`,
+    );
+
+    const fromTarget = await f.engine.locate({
+      query: "helperTarget dispatchTag",
+      limit: 6,
+    });
+    const callerHit = fromTarget.results.find((symbol) => symbol.name === "callerAlpha");
+    assert(callerHit);
+    assert(
+      callerHit.reason.includes("calls helperTarget"),
+      `unexpected caller reason: ${callerHit.reason}`,
+    );
+
+    const scoped = await f.engine.locate({
+      query: "pipeline checkpoint execute token",
+      scope: "service.ts",
+      limit: 6,
+    });
+    assert(scoped.results.some((symbol) => symbol.name === "PipelineService.executePlan"));
+    assert(scoped.results.some((symbol) => symbol.name === "PipelineService.run"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("Chinese intent queries, morphological prefixes, test downranking, and Rust tail aliases improve recall", async () => {
+  const f = await fixture({
+    "src/watcher.ts": `export function scheduleDebounceRefresh(cancellation: AbortSignal): void {
+      void cancellation;
+    }`,
+    "tests/watcher.test.ts": `export function scheduleDebounceRefreshTest(cancellation: AbortSignal): void {
+      void cancellation;
+    }`,
+    "widget.rs": `pub struct Task;
+    impl Drop for Task {
+      fn drop(&mut self) {}
+    }
+    pub struct Widget;
+    impl Widget {
+      pub fn new() -> Self { Self }
+    }`,
+  });
+  try {
+    const zh = await f.engine.locate({ query: "文件监听去抖", limit: 6 });
+    assert.equal(zh.results[0]?.path, "src/watcher.ts");
+    assert.equal(zh.results[0]?.name, "scheduleDebounceRefresh");
+
+    const prefix = await f.engine.locate({ query: "cancel", limit: 6 });
+    assert.equal(prefix.results[0]?.path, "src/watcher.ts");
+
+    const explicitlyTests = await f.engine.locate({
+      query: "scheduleDebounceRefresh test",
+      limit: 6,
+    });
+    assert(explicitlyTests.results.some((symbol) => symbol.path === "tests/watcher.test.ts"));
+
+    const rustDrop = await f.engine.locate({ query: "Task::drop", limit: 6 });
+    assert.equal(rustDrop.results[0]?.name, "Task as Drop::drop");
+
+    const rustNew = await f.engine.locate({ query: "Widget::new", limit: 6 });
+    assert.equal(rustNew.results[0]?.name, "Widget::new");
+  } finally {
+    await f.cleanup();
+  }
+});

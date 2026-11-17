@@ -29,10 +29,13 @@ export interface SourceScan {
   accepts(path: string, directory: boolean): boolean;
   isCurrent(): boolean;
 }
-function fileIdentity(path: string): string {
+export interface ScanSourcesOptions {
+  knownFiles?: ReadonlyMap<string, { hash: string; stat?: string }>;
+}
+export function fileIdentity(path: string): string {
   try {
     const stat = lstatSync(path, { bigint: true });
-    return [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+    return `${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
     throw error;
@@ -127,6 +130,7 @@ interface IgnoreRule {
 export async function scanSources(
   root: string,
   cancellation?: GraphCancellation,
+  options?: ScanSourcesOptions,
 ): Promise<SourceScan> {
   const paths: string[] = [];
   const files: SourceFile[] = [];
@@ -134,7 +138,11 @@ export async function scanSources(
   const directories = new Set<string>();
   const directoryRules = new Map<string, IgnoreRule[]>();
   const identities = new Map<string, string>();
-  const remember = (path: string) => identities.set(path, fileIdentity(path));
+  const remember = (path: string) => {
+    const id = fileIdentity(path);
+    identities.set(path, id);
+    return id;
+  };
   function accepts(path: string, directory: boolean): boolean {
     const absolutePath = projectPath(root, path);
     let parent = path.split("/").slice(0, -1).join("/");
@@ -149,52 +157,84 @@ export async function scanSources(
     }
     return !ignored;
   }
-  async function visit(directory: string, inherited: IgnoreRule[]): Promise<void> {
-    cancellation?.throwIfAborted();
-    // Capture before reading: an edit during asynchronous I/O must invalidate the snapshot.
-    remember(directory);
-    const rules = [...inherited];
-    for (const name of [".gitignore", ".graphignore"]) {
+  const pendingDirs: { directory: string; inherited: IgnoreRule[] }[] = [
+    { directory: root, inherited: [] },
+  ];
+  let activeDirs = 0;
+  let dirError: unknown;
+  await new Promise<void>((resolveAll, rejectAll) => {
+    const pump = () => {
+      if (dirError) return;
+      while (activeDirs < 8 && pendingDirs.length) {
+        const nextDir = pendingDirs.shift();
+        if (!nextDir) break;
+        activeDirs++;
+        visit(nextDir.directory, nextDir.inherited)
+          .then(() => {
+            activeDirs--;
+            if (dirError) return;
+            if (pendingDirs.length) pump();
+            else if (activeDirs === 0) resolveAll();
+          })
+          .catch((error) => {
+            if (!dirError) {
+              dirError = error;
+              rejectAll(error);
+            }
+          });
+      }
+      if (activeDirs === 0 && pendingDirs.length === 0 && !dirError) resolveAll();
+    };
+    async function visit(directory: string, inherited: IgnoreRule[]): Promise<void> {
       cancellation?.throwIfAborted();
-      remember(join(directory, name));
-      try {
-        rules.push({
-          base: directory,
-          matcher: ignore().add(await readFile(join(directory, name), "utf8")),
-        });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Capture before reading: an edit during asynchronous I/O must invalidate the snapshot.
+      remember(directory);
+      const entries = await readdir(directory, { withFileTypes: true });
+      cancellation?.throwIfAborted();
+      const entryNames = new Set(entries.map((entry) => entry.name));
+      const rules = [...inherited];
+      for (const name of [".gitignore", ".graphignore"]) {
+        if (!entryNames.has(name)) continue;
+        cancellation?.throwIfAborted();
+        const ignorePath = join(directory, name);
+        remember(ignorePath);
+        try {
+          rules.push({
+            base: directory,
+            matcher: ignore().add(await readFile(ignorePath, "utf8")),
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+      const local = normalizePath(relative(root, directory));
+      directories.add(local);
+      directoryRules.set(local, rules);
+      for (const entry of entries) {
+        cancellation?.throwIfAborted();
+        if (entry.isSymbolicLink() || excluded.has(entry.name)) continue;
+        const absolutePath = join(directory, entry.name);
+        const suffix = entry.isDirectory() ? "/" : "";
+        let ignored = false;
+        for (const { base, matcher } of rules) {
+          const match = matcher.test(normalizePath(relative(base, absolutePath)) + suffix);
+          if (match.ignored) ignored = true;
+          else if (match.unignored) ignored = false;
+        }
+        if (ignored) continue;
+        if (entry.isDirectory()) {
+          pendingDirs.push({ directory: absolutePath, inherited: rules });
+          continue;
+        }
+        if (!entry.isFile() || !isSourcePath(entry.name)) continue;
+        paths.push(absolutePath);
       }
     }
-    const local = normalizePath(relative(root, directory));
-    directories.add(local);
-    directoryRules.set(local, rules);
-    cancellation?.throwIfAborted();
-    const entries = await readdir(directory, { withFileTypes: true });
-    cancellation?.throwIfAborted();
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      cancellation?.throwIfAborted();
-      if (entry.isSymbolicLink() || excluded.has(entry.name)) continue;
-      const absolutePath = join(directory, entry.name);
-      const suffix = entry.isDirectory() ? "/" : "";
-      let ignored = false;
-      for (const { base, matcher } of rules) {
-        const match = matcher.test(normalizePath(relative(base, absolutePath)) + suffix);
-        if (match.ignored) ignored = true;
-        else if (match.unignored) ignored = false;
-      }
-      if (ignored) continue;
-      if (entry.isDirectory()) {
-        await visit(absolutePath, rules);
-        continue;
-      }
-      if (!entry.isFile() || !isSourcePath(entry.name)) continue;
-      paths.push(absolutePath);
-    }
-  }
-  await visit(root, []);
+    pump();
+  });
+  paths.sort((a, b) => a.localeCompare(b));
   let next = 0;
+  const knownFiles = options?.knownFiles;
   async function readSources(): Promise<void> {
     while (next < paths.length) {
       cancellation?.throwIfAborted();
@@ -202,19 +242,34 @@ export async function scanSources(
       const absolutePath = paths[index];
       if (!absolutePath) continue;
       try {
-        remember(absolutePath);
+        const stat = remember(absolutePath);
+        if (stat === "missing") continue;
+        const path = normalizePath(relative(root, absolutePath));
+        const known = knownFiles?.get(path);
+        if (known?.stat && known.stat === stat) {
+          files[index] = {
+            path,
+            absolutePath,
+            content: "",
+            hash: known.hash,
+            stat,
+            contentLoaded: false,
+          };
+          continue;
+        }
         const content = await readFile(absolutePath, "utf8");
         cancellation?.throwIfAborted();
         if (content.length > 2_000_000) {
-          warnings[index] =
-            `${normalizePath(relative(root, absolutePath))}: exceeds 2 MB source limit`;
+          warnings[index] = `${path}: exceeds 2 MB source limit`;
           continue;
         }
         files[index] = {
-          path: normalizePath(relative(root, absolutePath)),
+          path,
           absolutePath,
           content,
           hash: hashContent(content),
+          stat,
+          contentLoaded: true,
         };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -242,4 +297,32 @@ export async function scanSources(
       }
     },
   };
+}
+export async function hydrateSourceFiles(
+  files: SourceFile[],
+  cancellation?: GraphCancellation,
+): Promise<SourceFile[]> {
+  const missing = files.filter((file) => file.contentLoaded === false);
+  if (!missing.length) return files;
+  let next = 0;
+  async function load(): Promise<void> {
+    while (next < missing.length) {
+      cancellation?.throwIfAborted();
+      const file = missing[next++];
+      if (!file) continue;
+      const stat = fileIdentity(file.absolutePath);
+      const content = await readFile(file.absolutePath, "utf8");
+      cancellation?.throwIfAborted();
+      file.content = content;
+      file.hash = hashContent(content);
+      file.stat = stat;
+      file.contentLoaded = true;
+    }
+  }
+  const reads = await Promise.allSettled(
+    Array.from({ length: Math.min(8, missing.length) }, () => load()),
+  );
+  const failed = reads.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+  return files;
 }

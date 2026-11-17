@@ -1,9 +1,11 @@
 import { join, resolve } from "node:path";
-import { RustGraph } from "../languages/rust.js";
-import { SyntaxGraph } from "../languages/syntax.js";
-import { syntaxLanguage } from "../languages/tree-sitter.js";
-import { languageConfiguration, TypeScriptGraph } from "../languages/typescript.js";
+import type { RustGraph } from "../languages/rust.js";
+import type { SyntaxGraph } from "../languages/syntax.js";
+import type { LanguageConfiguration, TypeScriptGraph } from "../languages/typescript.js";
 import {
+  fileIdentity,
+  hashContent,
+  hydrateSourceFiles,
   projectPath,
   relevantSourceChange,
   repositoryHead,
@@ -24,12 +26,24 @@ import type {
   SourceFile,
 } from "./types.js";
 
-const CONFIG_VERSION = "syntax-v3:frameworks-v4:rust-wasm-v2";
+const SYNTAX_VERSION = "syntax-v4";
+const TS_VERSION = "frameworks-v5";
+const RUST_VERSION = "rust-wasm-v3";
+const CONFIG_VERSION = `${SYNTAX_VERSION}:${TS_VERSION}:${RUST_VERSION}`;
 
 interface DomainWarnings {
   ts: string[];
   rust: string[];
   syntax: Record<string, string[]>;
+}
+interface DomainVersions {
+  ts: string;
+  rust: string;
+  syntax: string;
+}
+interface WatchedEntry {
+  path: string;
+  stat: string;
 }
 
 function isRustPath(path: string): boolean {
@@ -37,11 +51,41 @@ function isRustPath(path: string): boolean {
 }
 
 function isSyntaxPath(path: string): boolean {
-  return Boolean(syntaxLanguage(path));
+  return /\.(?:dart|go|kts?)$/i.test(path);
 }
 
 function isTsPath(path: string): boolean {
   return !isRustPath(path) && !isSyntaxPath(path);
+}
+
+function isWatchedCurrent(entries: WatchedEntry[] | undefined): boolean {
+  if (!entries?.length) return false;
+  for (const entry of entries) {
+    if (fileIdentity(entry.path) !== entry.stat) return false;
+  }
+  return true;
+}
+
+function readWatched(raw: string | undefined): WatchedEntry[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.every(
+        (item) =>
+          item !== null &&
+          typeof item === "object" &&
+          typeof (item as WatchedEntry).path === "string" &&
+          typeof (item as WatchedEntry).stat === "string",
+      )
+    ) {
+      return parsed as WatchedEntry[];
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function readDomainWarnings(raw: string | undefined): DomainWarnings | undefined {
@@ -67,10 +111,30 @@ function readDomainWarnings(raw: string | undefined): DomainWarnings | undefined
   }
 }
 
+function readDomainVersions(raw: string | undefined): DomainVersions | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DomainVersions>;
+    if (
+      typeof parsed.ts === "string" &&
+      typeof parsed.rust === "string" &&
+      typeof parsed.syntax === "string"
+    ) {
+      return { ts: parsed.ts, rust: parsed.rust, syntax: parsed.syntax };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class GraphEngine {
   readonly root: string;
   private store: GraphStore;
-  private parser = new TypeScriptGraph();
+  private parser?: TypeScriptGraph;
+  private rustParser?: RustGraph;
+  private syntaxParser?: SyntaxGraph;
+  private cachedConfig?: LanguageConfiguration;
   private sources = new Map<string, SourceFile>();
   private warnings: string[] = [];
   private lastChanged = 0;
@@ -87,6 +151,48 @@ export class GraphEngine {
     this.root = resolve(root);
     this.store = new GraphStore(databasePath ?? join(this.root, ".pi-graph", "index.sqlite"));
     this.warnings = this.store.warnings() ?? [];
+  }
+  private async getConfigSnapshot(): Promise<{
+    configHash: string;
+    tsConfigHash: string;
+    watched: WatchedEntry[];
+    config?: LanguageConfiguration;
+  }> {
+    if (this.cachedConfig && isWatchedCurrent(this.cachedConfig.watched)) {
+      return {
+        configHash: `${CONFIG_VERSION}:${this.cachedConfig.hash}`,
+        tsConfigHash: `${TS_VERSION}:${this.cachedConfig.hash}`,
+        watched: this.cachedConfig.watched ?? [],
+        config: this.cachedConfig,
+      };
+    }
+    const storedHash = this.store.metadata("configHash");
+    const storedPrefix = storedHash?.split(":").slice(0, 3).join(":");
+    const storedWatched = readWatched(this.store.metadata("configWatched"));
+    if (storedHash && storedPrefix === CONFIG_VERSION && isWatchedCurrent(storedWatched)) {
+      const rawHash = storedHash.slice(CONFIG_VERSION.length + 1);
+      return {
+        configHash: storedHash,
+        tsConfigHash: `${TS_VERSION}:${rawHash}`,
+        watched: storedWatched ?? [],
+      };
+    }
+    const { languageConfiguration } = await import("../languages/typescript.js");
+    this.cachedConfig = languageConfiguration(this.root);
+    return {
+      configHash: `${CONFIG_VERSION}:${this.cachedConfig.hash}`,
+      tsConfigHash: `${TS_VERSION}:${this.cachedConfig.hash}`,
+      watched: this.cachedConfig.watched ?? [],
+      config: this.cachedConfig,
+    };
+  }
+  private async ensureConfig(): Promise<LanguageConfiguration> {
+    if (this.cachedConfig && isWatchedCurrent(this.cachedConfig.watched)) {
+      return this.cachedConfig;
+    }
+    const { languageConfiguration } = await import("../languages/typescript.js");
+    this.cachedConfig = languageConfiguration(this.root);
+    return this.cachedConfig;
   }
   setWatching(active: boolean): void {
     this.watching = active;
@@ -111,8 +217,8 @@ export class GraphEngine {
     attempt = 0,
   ): Promise<GraphStatus> {
     cancellation?.throwIfAborted();
-    const config = languageConfiguration(this.root);
-    const configHash = `${CONFIG_VERSION}:${config.hash}`;
+    const configSnap = await this.getConfigSnapshot();
+    const configHash = configSnap.configHash;
     const head = repositoryHead(this.root);
     const now = Date.now();
     if (
@@ -133,13 +239,26 @@ export class GraphEngine {
       return this.status();
     }
     const changes = this.changes;
-    const scan = await scanSources(this.root, cancellation);
+    const storedFiles = this.store.files();
+    const canReuseStat =
+      !force &&
+      this.watching &&
+      storedFiles.length > 0 &&
+      (!this.scan || (now >= this.lastScan && now - this.lastScan < 30_000));
+    const knownFiles = canReuseStat
+      ? new Map(storedFiles.map((file) => [file.path, file]))
+      : undefined;
+    const scan = await scanSources(
+      this.root,
+      cancellation,
+      knownFiles ? { knownFiles } : undefined,
+    );
     cancellation?.throwIfAborted();
     const retryIfChanged = (): Promise<GraphStatus> | undefined => {
       if (
         scan.isCurrent() &&
         repositoryHead(this.root) === head &&
-        `${CONFIG_VERSION}:${languageConfiguration(this.root).hash}` === configHash
+        isWatchedCurrent(configSnap.watched)
       )
         return;
       if (attempt >= 2) throw new Error("Sources changed while indexing; retry the graph query.");
@@ -147,13 +266,22 @@ export class GraphEngine {
     };
     const retry = retryIfChanged();
     if (retry) return retry;
-    const previous = new Map(this.store.files().map((file) => [file.path, file.hash]));
+    const previous = new Map(storedFiles.map((file) => [file.path, file.hash]));
     const changed = scan.files.filter((file) => previous.get(file.path) !== file.hash);
     const current = new Set(scan.files.map((file) => file.path));
     const deleted = [...previous.keys()].filter((path) => !current.has(path));
     cancellation?.throwIfAborted();
     const storedDomainWarnings = readDomainWarnings(this.store.metadata("domainWarnings"));
-    const configChanged = this.store.metadata("configHash") !== configHash;
+    const storedDomainVersions = readDomainVersions(this.store.metadata("domainVersions"));
+    const currentDomainVersions: DomainVersions = {
+      ts: configSnap.tsConfigHash,
+      rust: RUST_VERSION,
+      syntax: SYNTAX_VERSION,
+    };
+    const storedConfigHash = this.store.metadata("configHash");
+    const configChanged = storedConfigHash !== configHash;
+    const storedPrefix = storedConfigHash?.split(":").slice(0, 3).join(":");
+    const versionMismatch = storedPrefix !== CONFIG_VERSION;
     const warningsMissing = this.store.warnings() === undefined;
     const scanWarningsChanged =
       JSON.stringify(scan.warnings) !== this.store.metadata("scanWarnings");
@@ -164,15 +292,29 @@ export class GraphEngine {
       configChanged ||
       warningsMissing ||
       scanWarningsChanged ||
-      !storedDomainWarnings
+      !storedDomainWarnings ||
+      !storedDomainVersions
     ) {
-      const fullRebuild = force || configChanged || warningsMissing || !storedDomainWarnings;
+      const fullRebuild =
+        force ||
+        versionMismatch ||
+        warningsMissing ||
+        !storedDomainWarnings ||
+        !storedDomainVersions;
+      const tsConfigChanged = !fullRebuild && storedDomainVersions.ts !== currentDomainVersions.ts;
       const tsDirty =
-        fullRebuild || changed.some((file) => isTsPath(file.path)) || deleted.some(isTsPath);
+        fullRebuild ||
+        tsConfigChanged ||
+        changed.some((file) => isTsPath(file.path)) ||
+        deleted.some(isTsPath);
       const rustDirty =
-        fullRebuild || changed.some((file) => isRustPath(file.path)) || deleted.some(isRustPath);
+        fullRebuild ||
+        storedDomainVersions.rust !== currentDomainVersions.rust ||
+        changed.some((file) => isRustPath(file.path)) ||
+        deleted.some(isRustPath);
       const syntaxDirty =
         fullRebuild ||
+        storedDomainVersions.syntax !== currentDomainVersions.syntax ||
         changed.some((file) => isSyntaxPath(file.path)) ||
         deleted.some(isSyntaxPath);
 
@@ -189,12 +331,35 @@ export class GraphEngine {
 
       if (tsDirty) {
         const tsFiles = scan.files.filter((file) => isTsPath(file.path));
-        if (scopePaths) {
-          scopePaths.push(...tsFiles.map((file) => file.path), ...deleted.filter(isTsPath));
+        await hydrateSourceFiles(tsFiles, cancellation);
+        const { TypeScriptGraph } = await import("../languages/typescript.js");
+        const resolvedConfig = configSnap.config ?? (await this.ensureConfig());
+        this.parser ??= new TypeScriptGraph();
+        const tsChangedPaths = tsConfigChanged
+          ? new Set(tsFiles.map((file) => file.path))
+          : new Set(changed.filter((file) => isTsPath(file.path)).map((file) => file.path));
+        const tsDeletedPaths = deleted.filter(isTsPath);
+        const ts = this.parser.build(this.root, tsFiles, resolvedConfig, {
+          dirtyPaths: tsChangedPaths,
+          deletedPaths: tsDeletedPaths,
+        });
+        if (
+          scopePaths &&
+          !tsConfigChanged &&
+          ts.scopePaths !== undefined &&
+          ts.deltaSymbols &&
+          ts.deltaEdges
+        ) {
+          scopePaths.push(...ts.scopePaths);
+          symbols.push(...ts.deltaSymbols);
+          edges.push(...ts.deltaEdges);
+        } else {
+          if (scopePaths) {
+            scopePaths.push(...tsFiles.map((file) => file.path), ...tsDeletedPaths);
+          }
+          symbols.push(...ts.symbols);
+          edges.push(...ts.edges);
         }
-        const ts = this.parser.build(this.root, tsFiles, config);
-        symbols.push(...ts.symbols);
-        edges.push(...ts.edges);
         domainWarnings.ts = ts.warnings;
         // Synchronous compilers cannot be preempted; cancellation is checked between phases.
         cancellation?.throwIfAborted();
@@ -202,8 +367,13 @@ export class GraphEngine {
 
       if (rustDirty) {
         const rustFiles = scan.files.filter((file) => isRustPath(file.path));
+        await hydrateSourceFiles(rustFiles, cancellation);
         if (scopePaths) {
           scopePaths.push(...rustFiles.map((file) => file.path), ...deleted.filter(isRustPath));
+        }
+        if (!this.rustParser) {
+          const { RustGraph } = await import("../languages/rust.js");
+          this.rustParser = new RustGraph();
         }
         const rust = await this.rustParser.build(rustFiles);
         symbols.push(...rust.symbols);
@@ -213,13 +383,25 @@ export class GraphEngine {
       }
 
       if (syntaxDirty) {
-        const syntaxInput = fullRebuild
+        const syntaxFull =
+          fullRebuild ||
+          (storedDomainVersions && storedDomainVersions.syntax !== currentDomainVersions.syntax);
+        const syntaxInput = syntaxFull
           ? scan.files.filter((file) => isSyntaxPath(file.path))
           : changed.filter((file) => isSyntaxPath(file.path));
+        await hydrateSourceFiles(syntaxInput, cancellation);
         const syntaxDeleted = deleted.filter(isSyntaxPath);
-        if (fullRebuild) domainWarnings.syntax = {};
-        else if (scopePaths) {
+        if (syntaxFull) {
+          domainWarnings.syntax = {};
+          if (scopePaths) {
+            scopePaths.push(...syntaxInput.map((file) => file.path), ...syntaxDeleted);
+          }
+        } else if (scopePaths) {
           scopePaths.push(...syntaxInput.map((file) => file.path), ...syntaxDeleted);
+        }
+        if (!this.syntaxParser) {
+          const { SyntaxGraph } = await import("../languages/syntax.js");
+          this.syntaxParser = new SyntaxGraph();
         }
         const syntax = await this.syntaxParser.update(syntaxInput, syntaxDeleted);
         for (const path of syntaxDeleted) delete domainWarnings.syntax[path];
@@ -243,7 +425,11 @@ export class GraphEngine {
       ].slice(0, 12);
       this.store.commit(scan.files, symbols, edges, configHash, warnings, scan.warnings, {
         scopePaths,
-        extraMetadata: { domainWarnings: JSON.stringify(domainWarnings) },
+        extraMetadata: {
+          domainWarnings: JSON.stringify(domainWarnings),
+          domainVersions: JSON.stringify(currentDomainVersions),
+          configWatched: JSON.stringify(configSnap.watched),
+        },
       });
       this.warnings = warnings;
     } else {
@@ -278,11 +464,23 @@ export class GraphEngine {
   async inspect(input: InspectInput, cancellation?: GraphCancellation): Promise<InspectResult> {
     await this.refresh(false, cancellation);
     cancellation?.throwIfAborted();
-    const symbol = this.store.symbol(input.id);
+    let symbol = this.store.symbol(input.id);
     if (!symbol) throw new Error("Symbol not found in current index; run graph_locate again.");
     projectPath(this.root, symbol.path);
-    const file = this.sources.get(symbol.path);
+    let file = this.sources.get(symbol.path);
     if (!file) throw new Error("Source no longer indexed; run graph_locate again.");
+    if (file.contentLoaded === false) {
+      await hydrateSourceFiles([file], cancellation);
+      const expectedHash = this.store.fileHash(symbol.path);
+      if (expectedHash && hashContent(file.content) !== expectedHash) {
+        await this.refresh(true, cancellation);
+        symbol = this.store.symbol(input.id);
+        if (!symbol) throw new Error("Symbol not found in current index; run graph_locate again.");
+        file = this.sources.get(symbol.path);
+        if (!file) throw new Error("Source no longer indexed; run graph_locate again.");
+        await hydrateSourceFiles([file], cancellation);
+      }
+    }
     const maxCharacters = input.maxCharacters ?? 8000;
     const neighborLimit = input.neighbors ?? 6;
     if (!Number.isInteger(maxCharacters) || maxCharacters < 200 || maxCharacters > 20000)
@@ -301,7 +499,13 @@ export class GraphEngine {
       if (seen.has(id) || neighbors.length >= neighborLimit) continue;
       seen.add(id);
       const other = related.get(id);
-      if (other) neighbors.push(located(other, 0, `${edge.kind} (${edge.evidence})`, edge));
+      if (other) {
+        const relationLabel =
+          edge.source === symbol.id
+            ? `${edge.kind} (${edge.evidence})`
+            : `${edge.kind === "calls" ? "called by" : edge.kind === "references" ? "referenced by" : "contained in"} (${edge.evidence})`;
+        neighbors.push(located(other, 0, relationLabel, edge));
+      }
     }
     const ids = new Set(neighbors.map((neighbor) => neighbor.id));
     return {
@@ -316,11 +520,8 @@ export class GraphEngine {
     };
   }
   close(): void {
-    this.rustParser.close();
-    this.syntaxParser.close();
+    this.rustParser?.close();
+    this.syntaxParser?.close();
     this.store.close();
   }
-
-  private rustParser = new RustGraph();
-  private syntaxParser = new SyntaxGraph();
 }

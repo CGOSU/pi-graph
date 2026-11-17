@@ -124,7 +124,6 @@ function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree
         .slice(node.startIndex, body?.startIndex ?? node.endIndex)
         .trim()
         .slice(0, 260);
-      const comment = documentation(node);
       owner = {
         id: key + (occurrence ? `:${occurrence}` : ""),
         path: file.path,
@@ -137,9 +136,7 @@ function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree
         endLine: node.endPosition.row + 1,
         signature,
         excerpt: text.slice(0, 180),
-        document: searchDocument(
-          [name, qualifiedName, signature, comment, file.path, text.slice(0, 8000)].join(" "),
-        ),
+        document: "",
         parentId: parent?.id,
         exported:
           namedChildren(node).some((child) => child.type === "visibility_modifier") ||
@@ -161,16 +158,62 @@ function fileGraph(parser: RustParser, file: SourceFile): RustFileGraph & { tree
       visit(child, owner, prefix, currentImpl, childModulePath);
   }
   visit(tree.rootNode);
+  const entryByNodeId = new Map(entries.map((entry) => [entry.node.id, entry]));
+  const ownTextById = new Map<string, string[]>();
+  const ownLenById = new Map<string, number>();
+  const appendOwn = (entry: RustEntry, text: string) => {
+    const id = entry.symbol.id;
+    const len = ownLenById.get(id) ?? 0;
+    if (len >= 8000) return;
+    let parts = ownTextById.get(id);
+    if (!parts) {
+      parts = [];
+      ownTextById.set(id, parts);
+    }
+    parts.push(text);
+    ownLenById.set(id, len + text.length + 1);
+  };
+  const collectOwnText = (node: Node, current?: RustEntry): void => {
+    if (node.type === "ERROR" || node.type === "token_tree") return;
+    const owner = entryByNodeId.get(node.id) ?? current;
+    if (node.type.includes("string") || node.type.endsWith("comment")) {
+      if (owner) appendOwn(owner, node.text);
+      return;
+    }
+    if (node.childCount === 0) {
+      if (owner && (node.type.includes("identifier") || node.type === "self")) {
+        appendOwn(owner, node.text);
+      }
+      return;
+    }
+    for (const child of namedChildren(node)) collectOwnText(child, owner);
+  };
+  collectOwnText(tree.rootNode);
+  const typeEntries = new Map<string, RustEntry>();
+  for (const entry of entries) {
+    if (entry.symbol.kind === "struct" || entry.symbol.kind === "enum") {
+      if (!typeEntries.has(entry.symbol.qualifiedName))
+        typeEntries.set(entry.symbol.qualifiedName, entry);
+    }
+    const own = ownTextById.get(entry.symbol.id)?.join(" ").slice(0, 8000) ?? "";
+    const comment = documentation(entry.node);
+    entry.symbol.document = searchDocument(
+      [
+        entry.symbol.name,
+        entry.symbol.qualifiedName,
+        entry.symbol.signature,
+        comment,
+        file.path,
+        own,
+      ].join(" "),
+    );
+  }
   for (const entry of entries) {
     if (!entry.symbol.parentId && entry.implementation && entry.symbol.kind === "method") {
       const type = implementationType(entry.implementation);
       const modulePrefix = entry.symbol.qualifiedName.split("::").slice(0, -2).join("::");
       const qualifiedType = [modulePrefix, type].filter(Boolean).join("::");
-      entry.symbol.parentId = entries.find(
-        (other) =>
-          other.symbol.qualifiedName === qualifiedType &&
-          (other.symbol.kind === "struct" || other.symbol.kind === "enum"),
-      )?.symbol.id;
+      entry.symbol.parentId = typeEntries.get(qualifiedType)?.symbol.id;
     }
     if (entry.symbol.parentId)
       edges.push({
