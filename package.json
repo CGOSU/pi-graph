@@ -34,7 +34,8 @@
     "format": "biome check --write .",
     "check": "pnpm run typecheck && pnpm run lint && pnpm test",
     "prepare": "node scripts/prepare.mjs",
-    "benchmark": "pnpm run build && node dist/scripts/benchmark.js"
+    "benchmark": "pnpm run build && node dist/scripts/benchmark.js",
+    "benchmark:agent": "pnpm run build && node dist/scripts/agent-benchmark.js"
   },
   "dependencies": {
     "@astrojs/compiler": "^4.0.0",
